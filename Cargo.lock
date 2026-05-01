@@ -1823,6 +1823,7 @@ dependencies = [
  "clap",
  "dirs",
  "indexmap 2.14.0",
+ "jiff",
  "reqwest 0.13.3",
  "rustic_backend",
  "rustic_core",

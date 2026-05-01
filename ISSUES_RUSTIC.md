@@ -118,4 +118,24 @@ Suggestion : afficher `2026-05-01 10:45:42 +02:00` ou laisser au caller le forma
 
 ---
 
-(autres issues à ajouter au fil des étapes 8 → 9)
+---
+
+## 5. `jiff::Zoned` exposé dans l'API publique mais non re-exporté (sévérité : low, dev-friendliness)
+
+`KeepOptions::apply` prend `&jiff::Zoned` comme argument :
+
+```rust
+pub fn apply(&self, snapshots: Vec<SnapshotFile>, now: &Zoned) -> RusticResult<Vec<ForgetSnapshot>>;
+```
+
+Pour appeler cette fonction, le caller doit ajouter `jiff` à son `Cargo.toml` même s'il n'utilise rustic_core que pour faire de la rétention. Idem pour `SnapshotFile::time` qui est un `Zoned`.
+
+C'est un cas classique de "leaked dependency" : la version de jiff que l'utilisateur déclare doit matcher celle que rustic_core utilise (sinon `Zoned` est un type différent, l'API ne marche pas).
+
+Suggestion : `pub use jiff::Zoned` dans `rustic_core::lib.rs`, ou exposer un type wrapper opaque côté `rustic_core` pour les timestamps publics.
+
+(Pas un blocker — `cargo add jiff` règle le problème côté kovre.)
+
+---
+
+(autres issues à ajouter au fil de l'étape 9)

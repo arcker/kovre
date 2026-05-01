@@ -268,6 +268,55 @@ fn any_rule_set(r: &Retention) -> bool {
         || r.keep_yearly.is_some()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_keep_options_maps_all_fields() {
+        let r = Retention {
+            keep_last: Some(7),
+            keep_hourly: Some(24),
+            keep_daily: Some(30),
+            keep_weekly: Some(8),
+            keep_monthly: Some(12),
+            keep_yearly: Some(5),
+        };
+        let k = build_keep_options(&r);
+        assert_eq!(k.keep_last, Some(7));
+        assert_eq!(k.keep_hourly, Some(24));
+        assert_eq!(k.keep_daily, Some(30));
+        assert_eq!(k.keep_weekly, Some(8));
+        assert_eq!(k.keep_monthly, Some(12));
+        assert_eq!(k.keep_yearly, Some(5));
+    }
+
+    #[test]
+    fn build_keep_options_leaves_unset_fields_none() {
+        let r = Retention {
+            keep_last: Some(3),
+            ..Default::default()
+        };
+        let k = build_keep_options(&r);
+        assert_eq!(k.keep_last, Some(3));
+        assert_eq!(k.keep_daily, None);
+        assert_eq!(k.keep_weekly, None);
+    }
+
+    #[test]
+    fn any_rule_set_detects_at_least_one_field() {
+        assert!(!any_rule_set(&Retention::default()));
+        assert!(any_rule_set(&Retention {
+            keep_last: Some(1),
+            ..Default::default()
+        }));
+        assert!(any_rule_set(&Retention {
+            keep_yearly: Some(1),
+            ..Default::default()
+        }));
+    }
+}
+
 fn snap_to_info(s: SnapshotFile) -> SnapshotInfo {
     SnapshotInfo {
         id: s.id.to_string(),

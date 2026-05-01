@@ -1,0 +1,44 @@
+# kovre — exemple de configuration
+# Voir README.md pour les détails et limitations.
+
+agent:
+  data_dir: C:\ProgramData\Kovre
+  log_level: info
+
+repositories:
+  nas:
+    path: \\nas.local\backup\kovre
+    password_file: C:\ProgramData\Kovre\nas.key
+
+jobs:
+  documents:
+    template: documents
+    repository: nas
+    retention:
+      keep_daily: 7
+      keep_weekly: 4
+      keep_monthly: 12
+
+  dev:
+    template: dev-repos
+    repository: nas
+    template_options:
+      scan_root: D:\dev
+    retention:
+      keep_last: 30
+
+  steam:
+    template: steam-saves
+    repository: nas
+    retention:
+      keep_last: 10
+
+  # Job sans template — paths/excludes explicites
+  custom-photos:
+    repository: nas
+    paths:
+      - D:\Photos
+    excludes:
+      - "**/*.tmp"
+    retention:
+      keep_last: 50

@@ -1,0 +1,14 @@
+/target
+Cargo.lock.bak
+*.log
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Local kovre runtime data — never commit a real config or repo password
+/kovre.yaml
+*.key
+/data_dir/
+/.smoke/

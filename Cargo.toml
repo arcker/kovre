@@ -25,4 +25,5 @@ walkdir = "2.5.0"
 winreg = "0.56.0"
 
 [dev-dependencies]
+mockito = "1.7.0"
 tempfile = "3.27.0"

@@ -1,9 +1,3 @@
-mod backup;
-mod cli;
-mod config;
-mod ludusavi;
-mod templates;
-
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
@@ -11,9 +5,10 @@ use clap::Parser;
 use tracing::{error, info, info_span, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-use crate::backup::{BackupSource, SnapshotInfo};
-use crate::cli::{Cli, Command, RunArgs};
-use crate::config::{Config, Job, Retention};
+use kovre::backup::{self, BackupSource, SnapshotInfo};
+use kovre::cli::{Cli, Command, RunArgs};
+use kovre::config::{Config, Job, Retention};
+use kovre::templates;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();

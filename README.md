@@ -80,6 +80,25 @@ Phase 1 ne fournit pas de commande `restore` propre. Les snapshots étant au for
 rustic -r \\nas.local\backup\kovre --password-file C:\ProgramData\Kovre\nas.key restore latest:/ /tmp/restore
 ```
 
+## Validation manuelle de la compat rustic CLI
+
+Les tests automatisés (`cargo test`) couvrent backup/restore via `rustic_core` directement, sans dépendre du binaire `rustic`. Pour valider que les snapshots produits sont aussi lisibles par la CLI `rustic` standard (le DoD de la Phase 1) :
+
+```sh
+# 1. Préparer un repo + un job dans kovre.yaml
+kovre init-repo nas
+kovre run documents
+
+# 2. Lister via rustic CLI
+rustic -r \\nas.local\backup\kovre --password-file C:\ProgramData\Kovre\nas.key snapshots
+
+# 3. Restore le dernier snapshot
+rustic -r \\nas.local\backup\kovre --password-file C:\ProgramData\Kovre\nas.key restore latest:/ C:\restore-test
+
+# 4. Diff l'arbo restaurée vs la source originale
+robocopy C:\Users\<you>\Documents C:\restore-test\Documents /L /MIR /NJH /NJS
+```
+
 ## Licence
 
 MIT OR Apache-2.0

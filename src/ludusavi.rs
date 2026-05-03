@@ -62,7 +62,18 @@ pub fn default_cache_dir() -> Result<PathBuf> {
 /// Returns an error only if no manifest can be obtained from any source.
 pub fn ensure_manifest_blocking(online: bool) -> Result<Manifest> {
     let cache = default_cache_dir()?;
-    fs::create_dir_all(&cache)
+    ensure_manifest_blocking_with(MANIFEST_URL, &cache, online)
+}
+
+/// Like `ensure_manifest_blocking` but with an explicit upstream URL and cache
+/// directory. Exposed for tests, where we serve the manifest from a local mock
+/// server and a `TempDir` cache instead of touching the user's real cache.
+pub fn ensure_manifest_blocking_with(
+    url: &str,
+    cache: &Path,
+    online: bool,
+) -> Result<Manifest> {
+    fs::create_dir_all(cache)
         .with_context(|| format!("creating cache dir `{}`", cache.display()))?;
 
     let yaml_path = cache.join("manifest.yaml");
@@ -78,10 +89,10 @@ pub fn ensure_manifest_blocking(online: bool) -> Result<Manifest> {
         .build()
         .context("creating tokio runtime for manifest download")?;
 
-    rt.block_on(fetch_or_load(&yaml_path, &etag_path))
+    rt.block_on(fetch_or_load(url, &yaml_path, &etag_path))
 }
 
-async fn fetch_or_load(yaml_path: &Path, etag_path: &Path) -> Result<Manifest> {
+async fn fetch_or_load(url: &str, yaml_path: &Path, etag_path: &Path) -> Result<Manifest> {
     let cached_etag = fs::read_to_string(etag_path)
         .ok()
         .map(|s| s.trim().to_string())
@@ -98,7 +109,7 @@ async fn fetch_or_load(yaml_path: &Path, etag_path: &Path) -> Result<Manifest> {
         }
     };
 
-    let mut req = client.get(MANIFEST_URL);
+    let mut req = client.get(url);
     if let Some(etag) = &cached_etag {
         req = req.header(reqwest::header::IF_NONE_MATCH, etag);
     }
@@ -196,6 +207,101 @@ mod tests {
 "#;
         let m: Manifest = parse_manifest(yaml).unwrap();
         assert!(m.contains_key("Game X"));
+    }
+
+    /// Minimal valid manifest used across the HTTP-flow tests below.
+    const SAMPLE_MANIFEST: &str = r#"
+"My Game":
+  installDir:
+    "My Game Folder": {}
+  files:
+    "<winDocuments>/MyGame/Saves":
+      tags:
+        - save
+      when:
+        - os: windows
+"#;
+
+    #[test]
+    fn first_fetch_writes_cache_and_etag() {
+        let mut server = mockito::Server::new();
+        let m = server
+            .mock("GET", "/manifest.yaml")
+            .with_status(200)
+            .with_header("etag", "\"abc123\"")
+            .with_body(SAMPLE_MANIFEST)
+            .expect(1)
+            .create();
+
+        let cache = tempfile::tempdir().unwrap();
+        let url = format!("{}/manifest.yaml", server.url());
+
+        let manifest = ensure_manifest_blocking_with(&url, cache.path(), true).unwrap();
+        assert!(manifest.contains_key("My Game"));
+
+        let yaml_cached = fs::read_to_string(cache.path().join("manifest.yaml")).unwrap();
+        assert!(yaml_cached.contains("My Game"));
+        let etag_cached = fs::read_to_string(cache.path().join("manifest.etag")).unwrap();
+        assert_eq!(etag_cached, "\"abc123\"");
+
+        m.assert();
+    }
+
+    #[test]
+    fn second_fetch_with_matching_etag_uses_cache_on_304() {
+        let mut server = mockito::Server::new();
+
+        // First call: 200 + ETag → cache populated.
+        let m1 = server
+            .mock("GET", "/manifest.yaml")
+            .with_status(200)
+            .with_header("etag", "\"v1\"")
+            .with_body(SAMPLE_MANIFEST)
+            .expect(1)
+            .create();
+
+        let cache = tempfile::tempdir().unwrap();
+        let url = format!("{}/manifest.yaml", server.url());
+        ensure_manifest_blocking_with(&url, cache.path(), true).unwrap();
+        m1.assert();
+
+        // Second call: server replies 304 only if If-None-Match: "v1".
+        let m2 = server
+            .mock("GET", "/manifest.yaml")
+            .match_header("if-none-match", "\"v1\"")
+            .with_status(304)
+            .expect(1)
+            .create();
+
+        let manifest = ensure_manifest_blocking_with(&url, cache.path(), true).unwrap();
+        assert!(manifest.contains_key("My Game"));
+        m2.assert();
+    }
+
+    #[test]
+    fn falls_back_to_cache_when_server_unreachable() {
+        // Pre-seed the cache with a valid manifest, then point the URL at a
+        // dead address — `ensure_manifest_blocking_with` should not fail.
+        let cache = tempfile::tempdir().unwrap();
+        fs::write(cache.path().join("manifest.yaml"), SAMPLE_MANIFEST).unwrap();
+
+        // Loopback port 1 is reserved and refuses connections — reqwest fails
+        // synchronously, exercising the network-error branch.
+        let manifest =
+            ensure_manifest_blocking_with("http://127.0.0.1:1/manifest.yaml", cache.path(), true)
+                .unwrap();
+        assert!(manifest.contains_key("My Game"));
+    }
+
+    #[test]
+    fn offline_without_cache_returns_error() {
+        let cache = tempfile::tempdir().unwrap();
+        let err = ensure_manifest_blocking_with("http://unused/", cache.path(), false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("offline") || msg.contains("cache"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]

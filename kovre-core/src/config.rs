@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn parses_full_example() {
-        let yaml = include_str!("../kovre.example.yaml");
+        let yaml = include_str!("../../kovre.example.yaml");
         let cfg = Config::from_str(yaml, &fake_path()).expect("example must parse");
 
         assert_eq!(cfg.agent.data_dir, PathBuf::from(r"C:\ProgramData\Kovre"));

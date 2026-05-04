@@ -201,8 +201,8 @@ jobs:
 
 #[test]
 fn retention_keep_last_forgets_older_snapshots() {
-    use kovre::backup::{BackupSource, apply_retention, backup_job, list_snapshots_for_job};
-    use kovre::config::{Repository as RepoConfig, Retention};
+    use kovre_core::backup::{BackupSource, apply_retention, backup_job, list_snapshots_for_job};
+    use kovre_core::config::{Repository as RepoConfig, Retention};
 
     let workspace = TempDir::new().unwrap();
     let root = workspace.path();
@@ -220,7 +220,7 @@ fn retention_keep_last_forgets_older_snapshots() {
         password_file: password_file.clone(),
     };
 
-    kovre::backup::init_repo(&repo_cfg).unwrap();
+    kovre_core::backup::init_repo(&repo_cfg).unwrap();
 
     // Create 5 snapshots back-to-back. Each iteration mutates the source so
     // the new snapshot is meaningfully distinct (rustic still creates a snapshot

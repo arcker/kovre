@@ -1,0 +1,19 @@
+[package]
+name = "kovre"
+version = "0.1.0"
+edition = "2021"
+description = "Backup orchestrator for Windows — declarative YAML, rustic_core engine"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "1.0.102"
+clap = { version = "4", features = ["derive"] }
+kovre-core = { path = "../kovre-core" }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+rustic_backend = "0.6.1"
+rustic_core = "0.11.0"
+tempfile = "3.27.0"

@@ -1,3 +1,5 @@
+mod cli;
+
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
@@ -5,10 +7,11 @@ use clap::Parser;
 use tracing::{error, info, info_span, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-use kovre::backup::{self, BackupSource, SnapshotInfo};
-use kovre::cli::{Cli, Command, RunArgs};
-use kovre::config::{Config, Job, Retention};
-use kovre::templates;
+use kovre_core::backup::{self, BackupSource, SnapshotInfo};
+use kovre_core::config::{Config, Job, Retention};
+use kovre_core::templates;
+
+use crate::cli::{Cli, Command, RunArgs};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();

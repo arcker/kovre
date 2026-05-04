@@ -1847,6 +1847,19 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "kovre-core",
+ "rustic_backend",
+ "rustic_core",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "kovre-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "dirs",
  "indexmap 2.14.0",
  "jiff",
@@ -1860,7 +1873,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "walkdir",
  "winreg",
 ]

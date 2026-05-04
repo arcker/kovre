@@ -1,0 +1,8 @@
+[toolchain]
+# Pinned because rustc 1.92 hits STATUS_STACK_BUFFER_OVERRUN building
+# rustls + aws-lc-rs (cf. memory project_kovre_tls_choice). 1.95 is the
+# first version known to compile the kovre dependency tree cleanly on
+# Windows 11. Bump deliberately, not by accident.
+channel = "1.95.0"
+profile = "default"
+targets = ["x86_64-pc-windows-msvc"]

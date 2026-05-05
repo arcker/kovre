@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
@@ -40,6 +41,27 @@ pub enum Command {
         /// Name of the repository, as defined in the configuration
         repository: String,
     },
+
+    /// Start the embedded dashboard web server (Phase 2)
+    Serve(ServeArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServeArgs {
+    /// TCP port to bind on
+    #[arg(long, default_value_t = 8080)]
+    pub port: u16,
+
+    /// Address to bind to. `127.0.0.1` (default) restricts the dashboard to
+    /// the local machine; use `0.0.0.0` to expose it on the LAN (requires
+    /// `agent.dashboard.token_file` in kovre.yaml — enforced in a later step).
+    #[arg(long, default_value = "127.0.0.1")]
+    pub bind: IpAddr,
+
+    /// Enable Lithair's admin panel at `/_admin/*`. Off by default;
+    /// useful for inspecting the event log and raw models during dev.
+    #[arg(long)]
+    pub debug: bool,
 }
 
 #[derive(Args, Debug)]
@@ -115,5 +137,41 @@ mod tests {
         let cli =
             Cli::try_parse_from(["kovre", "list-jobs", "--config", "alt.yaml"]).unwrap();
         assert_eq!(cli.config, PathBuf::from("alt.yaml"));
+    }
+
+    #[test]
+    fn parses_serve_with_defaults() {
+        let cli = Cli::try_parse_from(["kovre", "serve"]).unwrap();
+        match cli.command {
+            Command::Serve(args) => {
+                assert_eq!(args.port, 8080);
+                assert_eq!(args.bind.to_string(), "127.0.0.1");
+                assert!(!args.debug);
+            }
+            other => panic!("expected Serve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_serve_with_overrides() {
+        let cli = Cli::try_parse_from([
+            "kovre", "serve", "--port", "9090", "--bind", "0.0.0.0", "--debug",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Serve(args) => {
+                assert_eq!(args.port, 9090);
+                assert_eq!(args.bind.to_string(), "0.0.0.0");
+                assert!(args.debug);
+            }
+            other => panic!("expected Serve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_rejects_invalid_bind() {
+        let err =
+            Cli::try_parse_from(["kovre", "serve", "--bind", "not-an-ip"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 }

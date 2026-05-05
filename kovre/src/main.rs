@@ -1,4 +1,5 @@
 mod cli;
+mod serve;
 
 use std::process::ExitCode;
 
@@ -58,6 +59,7 @@ fn run(cli: Cli, cfg: Config) -> Result<()> {
         Command::Run(args) => cmd_run(&cfg, &args),
         Command::ListSnapshots { job } => cmd_list_snapshots(&cfg, &job),
         Command::InitRepo { repository } => cmd_init_repo(&cfg, &repository),
+        Command::Serve(args) => serve::run(&cfg, args),
     }
 }
 

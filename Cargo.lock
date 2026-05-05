@@ -2056,10 +2056,13 @@ dependencies = [
  "lithair-core",
  "rustic_backend",
  "rustic_core",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

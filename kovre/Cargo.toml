@@ -8,7 +8,12 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.102"
+bytes = "1.11.1"
 clap = { version = "4", features = ["derive"] }
+http = "1.4.0"
+http-body-util = "0.1.3"
+hyper = { version = "1.9.0", features = ["server"] }
+jiff = "0.2.24"
 kovre-core = { path = "../kovre-core" }
 lithair-core = { version = "0.2.0", features = ["admin-ui"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -19,6 +24,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+indexmap = "2.14.0"
 rustic_backend = "0.6.1"
 rustic_core = "0.11.0"
 tempfile = "3.27.0"

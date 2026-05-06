@@ -9,6 +9,7 @@
 
 pub mod models;
 pub mod runs;
+pub mod sync;
 
 use std::sync::Arc;
 
@@ -21,8 +22,9 @@ use lithair_core::LithairServer;
 use tracing::info;
 
 use crate::cli::ServeArgs;
-use crate::serve::models::JobRun;
+use crate::serve::models::{JobRun, Snapshot};
 use crate::serve::runs::{trigger_job_run, TriggerError};
+use crate::serve::sync::sync_snapshots;
 
 /// Entry point dispatched from `main::run` on `Command::Serve`.
 ///
@@ -42,6 +44,8 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
     let lithair_dir = cfg.agent.data_dir.join("lithair");
     let job_runs_path = lithair_dir.join("job_runs");
     let job_runs_path_str = job_runs_path.to_string_lossy().to_string();
+    let snapshots_path = lithair_dir.join("snapshots");
+    let snapshots_path_str = snapshots_path.to_string_lossy().to_string();
     let cfg_arc: Arc<Config> = Arc::new(cfg.clone());
 
     rt.block_on(async move {
@@ -53,19 +57,30 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
             "starting kovre dashboard"
         );
 
-        // Build the handler explicitly so the same instance backs both
+        // Build the handlers explicitly so the same instance backs both
         // the auto-generated CRUD endpoints (via `with_handler`) and the
-        // custom `POST /api/jobs/*/run` route (via `with_route`).
+        // custom routes (via `with_route`).
         let job_runs: Arc<DeclarativeHttpHandler<JobRun>> = Arc::new(
             DeclarativeHttpHandler::<JobRun>::new_with_replay(&job_runs_path_str)
                 .await
                 .map_err(|e| anyhow::anyhow!("initializing JobRun event store: {e}"))?,
         );
+        let snapshots: Arc<DeclarativeHttpHandler<Snapshot>> = Arc::new(
+            DeclarativeHttpHandler::<Snapshot>::new_with_replay(&snapshots_path_str)
+                .await
+                .map_err(|e| anyhow::anyhow!("initializing Snapshot event store: {e}"))?,
+        );
+
+        // Materialize snapshots from rustic into the projection at boot.
+        // Failures per-repo are logged but do not abort startup.
+        let synced = sync_snapshots(&snapshots, &cfg_arc).await;
+        info!(snapshots = synced, "initial snapshot sync completed");
 
         let mut server = LithairServer::new()
             .with_host(args.bind.to_string())
             .with_port(args.port)
-            .with_handler(Arc::clone(&job_runs), "/api/job_runs");
+            .with_handler(Arc::clone(&job_runs), "/api/job_runs")
+            .with_handler(Arc::clone(&snapshots), "/api/snapshots");
 
         // POST /api/jobs/:name/run — see `serve::runs::trigger_job_run`.
         let runs_for_route = Arc::clone(&job_runs);

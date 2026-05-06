@@ -70,6 +70,46 @@ pub struct JobRun {
     pub trigger: String,
 }
 
+/// Cached projection of a rustic snapshot, refreshed at server startup
+/// and on demand by the sync layer (`serve::sync`).
+///
+/// kovre never authoritatively *creates* a `Snapshot` from the dashboard —
+/// the source of truth lives in the rustic repository. POST/PUT/DELETE
+/// on `/api/snapshots` therefore only mutate the projection, never the
+/// underlying repo.
+#[derive(Debug, Clone, Serialize, Deserialize, DeclarativeModel)]
+pub struct Snapshot {
+    /// rustic snapshot id (full hex string).
+    #[http(expose)]
+    #[lifecycle(immutable)]
+    #[db(unique)]
+    pub id: String,
+
+    /// Name of the kovre job that produced this snapshot, derived from
+    /// the `kovre-job:<name>` tag attached at backup time.
+    #[http(expose)]
+    #[lifecycle(immutable)]
+    pub job_name: String,
+
+    /// RFC 3339 timestamp.
+    #[http(expose)]
+    #[lifecycle(immutable)]
+    pub time: String,
+
+    /// Source paths captured by the snapshot (string-formatted).
+    #[http(expose)]
+    pub paths: Vec<String>,
+
+    /// Hostname recorded by rustic at backup time.
+    #[http(expose)]
+    pub hostname: String,
+
+    /// Snapshot summary: `total_bytes_processed`. `None` if rustic did
+    /// not record a summary (older snapshots).
+    #[http(expose)]
+    pub bytes_total: Option<u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

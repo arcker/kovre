@@ -5,4 +5,4 @@
 # Windows 11. Bump deliberately, not by accident.
 channel = "1.95.0"
 profile = "default"
-targets = ["x86_64-pc-windows-msvc"]
+targets = ["x86_64-pc-windows-msvc", "wasm32-unknown-unknown"]

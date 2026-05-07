@@ -76,10 +76,19 @@ fn compare_values(a: Option<&Value>, b: Option<&Value>) -> Ordering {
 #[cfg(target_family = "wasm")]
 #[wasm_bindgen(js_name = sortRunsBy)]
 pub fn sort_runs_by(runs: JsValue, key: &str, direction: &str) -> Result<JsValue, JsValue> {
+    use serde::Serialize;
+
     let mut values: Vec<Value> = serde_wasm_bindgen::from_value(runs)
         .map_err(|e| JsValue::from_str(&format!("kovre-wasm: deserialize: {e}")))?;
     sort_runs(&mut values, key, direction);
-    serde_wasm_bindgen::to_value(&values)
+
+    // Default `to_value` emits `serde_json::Value::Object` as a JS `Map`,
+    // which JS callers can't access with `obj.field`. Force plain-object
+    // serialization so `runs[0].id` works in TypeScript.
+    let serializer =
+        serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+    values
+        .serialize(&serializer)
         .map_err(|e| JsValue::from_str(&format!("kovre-wasm: serialize: {e}")))
 }
 

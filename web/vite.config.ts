@@ -24,6 +24,14 @@ export default defineConfig({
 		// reachable through both IP families on this host.
 		host: '127.0.0.1',
 		port: 5173,
+		// `kovre-wasm` is installed via `npm install ../kovre-wasm/pkg`,
+		// which symlinks node_modules/kovre-wasm to a path outside the
+		// `web/` project root. Vite's default fs allow-list refuses to
+		// serve the underlying `.wasm` file with a 403; add the workspace
+		// root so dev mode can reach the bundle.
+		fs: {
+			allow: ['..']
+		},
 		proxy: {
 			'/api': 'http://127.0.0.1:18080',
 			'/health': 'http://127.0.0.1:18080',

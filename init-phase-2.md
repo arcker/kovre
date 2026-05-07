@@ -34,7 +34,7 @@ Phase 1 a livré le moteur CLI (cf. `init.md`, terminée le 2026-05-03). Phase 2
 
 ### Inclus
 
-- Sous-commande `kovre serve [--port 8080] [--bind 127.0.0.1] [--debug]`
+- Sous-commande `kovre serve [--port 18080] [--bind 127.0.0.1] [--debug]`
 - Modèles Lithair : `JobRun`, `Snapshot`, `Setting`
 - Sync `kovre.yaml` → modèles `Repository`/`Job` Lithair en lecture seule au démarrage (refresh sur SIGHUP ou flag `--watch-config`)
 - Custom routes :
@@ -132,7 +132,7 @@ agent:
   dashboard:
     enabled: true                         # default false (opt-in)
     bind: 127.0.0.1
-    port: 8080
+    port: 18080
     raftlog_dir: C:\ProgramData\Kovre\lithair  # event-sourced state lives here
     token_file: null                      # required if bind != 127.0.0.1
 ```
@@ -209,7 +209,7 @@ kovre/
 
 6. **Crate `kovre-wasm`** : créer la crate cdylib avec `wasm-bindgen`. Premier export : `sort_runs_by(runs_json, key, dir) -> runs_json`. Build via `wasm-pack build --target web`.
 
-7. **SvelteKit setup** : créer `web/`, configurer adapter-static, vite-plugin-wasm-pack, page `/` qui fetch `GET /api/job_runs` et affiche une table sans tri pour l'instant. Lance `npm run dev` avec proxy vers `kovre serve` sur :8080.
+7. **SvelteKit setup** : créer `web/`, configurer adapter-static, vite-plugin-wasm-pack, page `/` qui fetch `GET /api/job_runs` et affiche une table sans tri pour l'instant. Lance `npm run dev` avec proxy vers `kovre serve` sur :18080.
 
 8. **WASM dans Svelte** : la table de la page `/` utilise `sort_runs_by` côté client sur clic d'en-tête de colonne. Aucun JS de tri custom — uniquement le binding wasm.
 
@@ -223,7 +223,7 @@ kovre/
 
 - [ ] `cargo build --release` produit un binaire qui marche sur Windows 11
 - [ ] `npm --prefix web ci && npm --prefix web run build` produit `web/build/` qui est embarqué via rust-embed
-- [ ] `kovre serve` démarre sur 127.0.0.1:8080 par défaut, sert le frontend Svelte et les API Lithair
+- [ ] `kovre serve` démarre sur 127.0.0.1:18080 par défaut, sert le frontend Svelte et les API Lithair
 - [ ] Sous-commandes CLI Phase 1 (`run`, `list-jobs`, `list-snapshots`, `init-repo`) marchent encore — pas de régression
 - [ ] La page `/` liste les jobs depuis kovre.yaml et le statut du dernier run de chacun
 - [ ] La page `/jobs/:name` permet de déclencher un backup ; le run apparaît en historique avec status final correct

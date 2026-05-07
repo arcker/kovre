@@ -11,7 +11,7 @@ import wasm from 'vite-plugin-wasm';
 // `vite-plugin-top-level-await` is no longer compatible.
 //
 // In dev mode every `/api/*` request is proxied to the running
-// `kovre serve` instance on :8080. The frontend therefore never has to
+// `kovre serve` instance on :18080. The frontend therefore never has to
 // know about CORS or absolute URLs — same-origin in production (where
 // Lithair serves the bundled assets) and same-origin-by-proxy in dev.
 
@@ -25,11 +25,11 @@ export default defineConfig({
 		host: '127.0.0.1',
 		port: 5173,
 		proxy: {
-			'/api': 'http://127.0.0.1:8080',
-			'/health': 'http://127.0.0.1:8080',
-			'/ready': 'http://127.0.0.1:8080',
-			'/info': 'http://127.0.0.1:8080',
-			'/_admin': 'http://127.0.0.1:8080'
+			'/api': 'http://127.0.0.1:18080',
+			'/health': 'http://127.0.0.1:18080',
+			'/ready': 'http://127.0.0.1:18080',
+			'/info': 'http://127.0.0.1:18080',
+			'/_admin': 'http://127.0.0.1:18080'
 		}
 	}
 });

@@ -49,7 +49,7 @@ pub enum Command {
 #[derive(Args, Debug)]
 pub struct ServeArgs {
     /// TCP port to bind on
-    #[arg(long, default_value_t = 8080)]
+    #[arg(long, default_value_t = 18080)]
     pub port: u16,
 
     /// Address to bind to. `127.0.0.1` (default) restricts the dashboard to
@@ -144,7 +144,7 @@ mod tests {
         let cli = Cli::try_parse_from(["kovre", "serve"]).unwrap();
         match cli.command {
             Command::Serve(args) => {
-                assert_eq!(args.port, 8080);
+                assert_eq!(args.port, 18080);
                 assert_eq!(args.bind.to_string(), "127.0.0.1");
                 assert!(!args.debug);
             }

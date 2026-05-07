@@ -95,6 +95,42 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
             },
         );
 
+        // GET /api/jobs — read-only projection of kovre.yaml's `jobs:` block.
+        // We expose it as a list endpoint (no individual /api/jobs/:name route)
+        // because the frontend can filter client-side and we keep the API
+        // surface tight.
+        let cfg_for_jobs = Arc::clone(&cfg_arc);
+        server = server.with_route(
+            http::Method::GET,
+            "/api/jobs",
+            move |_req| {
+                let cfg = Arc::clone(&cfg_for_jobs);
+                Box::pin(async move { Ok(handle_list_jobs(cfg)) })
+            },
+        );
+
+        // POST /api/sync — refresh the Snapshot projection on demand.
+        // The boot-time sync only runs once; this lets the dashboard
+        // pull in snapshots created out-of-band (e.g. via the CLI) without
+        // restarting the server.
+        let snapshots_for_sync = Arc::clone(&snapshots);
+        let cfg_for_sync = Arc::clone(&cfg_arc);
+        server = server.with_route(
+            http::Method::POST,
+            "/api/sync",
+            move |_req| {
+                let snapshots = Arc::clone(&snapshots_for_sync);
+                let cfg = Arc::clone(&cfg_for_sync);
+                Box::pin(async move {
+                    let synced = sync_snapshots(&snapshots, &cfg).await;
+                    Ok(json_response(
+                        hyper::StatusCode::OK,
+                        serde_json::json!({"synced": synced}),
+                    ))
+                })
+            },
+        );
+
         if args.debug {
             server = server.with_admin_panel(true);
         }
@@ -204,6 +240,27 @@ fn json_response(status: hyper::StatusCode, body: serde_json::Value) -> hyper::R
         .header("content-type", "application/json")
         .body(Full::new(bytes))
         .expect("static headers + valid status never fails")
+}
+
+/// Project `kovre.yaml`'s `jobs:` block to a JSON array, attaching the
+/// job name (which is the IndexMap key, not a struct field).
+///
+/// This route is read-only on purpose: jobs and repositories live in
+/// the YAML and are the user's source of truth. The dashboard can read
+/// them but cannot mutate them.
+fn handle_list_jobs(cfg: Arc<Config>) -> hyper::Response<Full<Bytes>> {
+    let body: Vec<serde_json::Value> = cfg
+        .jobs
+        .iter()
+        .map(|(name, job)| {
+            let mut value = serde_json::to_value(job).unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("name".into(), serde_json::Value::String(name.clone()));
+            }
+            value
+        })
+        .collect();
+    json_response(hyper::StatusCode::OK, serde_json::Value::Array(body))
 }
 
 #[cfg(test)]

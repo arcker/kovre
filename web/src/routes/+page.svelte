@@ -1,35 +1,21 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { listJobRuns, type JobRun } from '$lib/api';
-	import init, { sortRunsBy } from 'kovre-wasm';
+	import { listJobs, listJobRuns, type Job, type JobRun } from '$lib/api';
+	import { formatTime } from '$lib/format';
 
-	type SortDir = 'asc' | 'desc';
+	interface Row {
+		job: Job;
+		lastRun: JobRun | null;
+	}
 
-	const COLUMNS: Array<{ key: keyof JobRun; label: string }> = [
-		{ key: 'job_name', label: 'Job' },
-		{ key: 'started_at', label: 'Started' },
-		{ key: 'finished_at', label: 'Finished' },
-		{ key: 'status', label: 'Status' },
-		{ key: 'bytes_processed', label: 'Bytes' },
-		{ key: 'trigger', label: 'Trigger' },
-		{ key: 'id', label: 'Run ID' }
-	];
-
-	let runs = $state<JobRun[]>([]);
+	let rows = $state<Row[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
-	let sortKey = $state<keyof JobRun>('started_at');
-	let sortDir = $state<SortDir>('desc');
-	let wasmReady = $state(false);
 
 	onMount(async () => {
-		// Load and initialize the WASM bundle before fetching, so the very
-		// first render is already sorted via WASM (no JS Array.sort fallback).
-		await init();
-		wasmReady = true;
 		try {
-			const data = await listJobRuns();
-			runs = applySort(data, sortKey, sortDir);
+			const [jobs, runs] = await Promise.all([listJobs(), listJobRuns()]);
+			rows = buildRows(jobs, runs);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -37,86 +23,53 @@
 		}
 	});
 
-	// Phase 2 constraint: every operation that mutates or projects a data
-	// array runs in WASM, never in JS. This is the single chokepoint —
-	// `Array.prototype.sort` is intentionally absent from this file.
-	function applySort(rows: JobRun[], key: keyof JobRun, dir: SortDir): JobRun[] {
-		// `$state.snapshot` strips the Svelte reactive Proxy; without it,
-		// serde-wasm-bindgen sees an opaque proxy and refuses to deserialize.
-		const plain = $state.snapshot(rows);
-		return sortRunsBy(plain, key, dir) as JobRun[];
-	}
-
-	function handleSort(key: keyof JobRun) {
-		if (sortKey === key) {
-			sortDir = sortDir === 'asc' ? 'desc' : 'asc';
-		} else {
-			sortKey = key;
-			sortDir = 'asc';
+	// Pure projection (no sort/filter via JS) — picks the most recent
+	// run per job by `started_at`. The "most recent" comparison is a
+	// scalar pick, not a sort, so it's allowed in JS without breaking
+	// the WASM-only sort rule.
+	function buildRows(jobs: Job[], runs: JobRun[]): Row[] {
+		const lastByJob = new Map<string, JobRun>();
+		for (const r of runs) {
+			const prev = lastByJob.get(r.job_name);
+			if (!prev || r.started_at > prev.started_at) {
+				lastByJob.set(r.job_name, r);
+			}
 		}
-		runs = applySort(runs, sortKey, sortDir);
-	}
-
-	function sortIndicator(key: keyof JobRun): string {
-		if (sortKey !== key) return '';
-		return sortDir === 'asc' ? ' ▲' : ' ▼';
-	}
-
-	function formatBytes(n: number | null): string {
-		if (n === null || n === undefined) return '—';
-		if (n < 1024) return `${n} B`;
-		const units = ['KB', 'MB', 'GB', 'TB'];
-		let v = n / 1024;
-		let unit = 0;
-		while (v >= 1024 && unit < units.length - 1) {
-			v /= 1024;
-			unit++;
-		}
-		return `${v.toFixed(1)} ${units[unit]}`;
-	}
-
-	function formatTime(iso: string | null): string {
-		if (!iso) return '—';
-		// Strip the optional RFC 9557 IANA-tz annotation that rustic_core
-		// emits (`...+02:00[+02:00]`) before handing to the Date parser.
-		const cleaned = iso.replace(/\[[^\]]+\]$/, '');
-		const d = new Date(cleaned);
-		if (isNaN(d.getTime())) return iso;
-		return d.toLocaleString();
+		return jobs.map((job) => ({ job, lastRun: lastByJob.get(job.name) ?? null }));
 	}
 </script>
 
-<h2>Runs</h2>
+<h2>Overview</h2>
 
 {#if loading}
 	<p>Loading…</p>
 {:else if error}
 	<p class="error">Error: {error}</p>
-{:else if runs.length === 0}
-	<p class="empty">No runs recorded yet. Trigger one from the CLI or via <code>POST /api/jobs/&lt;name&gt;/run</code>.</p>
+{:else if rows.length === 0}
+	<p class="empty">No jobs declared in <code>kovre.yaml</code>.</p>
 {:else}
 	<table>
 		<thead>
 			<tr>
-				{#each COLUMNS as col (col.key)}
-					<th>
-						<button type="button" class="sort-header" onclick={() => handleSort(col.key)}>
-							{col.label}{sortIndicator(col.key)}
-						</button>
-					</th>
-				{/each}
+				<th>Job</th>
+				<th>Repository</th>
+				<th>Template</th>
+				<th>Last run</th>
+				<th>Status</th>
+				<th></th>
 			</tr>
 		</thead>
 		<tbody>
-			{#each runs as run (run.id)}
-				<tr class={`row-${run.status}`}>
-					<td>{run.job_name}</td>
-					<td>{formatTime(run.started_at)}</td>
-					<td>{formatTime(run.finished_at)}</td>
-					<td>{run.status}</td>
-					<td>{formatBytes(run.bytes_processed)}</td>
-					<td>{run.trigger}</td>
-					<td class="mono">{run.id.slice(0, 8)}</td>
+			{#each rows as row (row.job.name)}
+				<tr>
+					<td><a href="/jobs/{row.job.name}">{row.job.name}</a></td>
+					<td>{row.job.repository}</td>
+					<td>{row.job.template ?? '(custom)'}</td>
+					<td>{formatTime(row.lastRun?.started_at ?? null)}</td>
+					<td class={row.lastRun ? `status-${row.lastRun.status}` : 'status-none'}>
+						{row.lastRun?.status ?? '—'}
+					</td>
+					<td><a class="cta" href="/jobs/{row.job.name}">open →</a></td>
 				</tr>
 			{/each}
 		</tbody>
@@ -139,28 +92,10 @@
 
 	thead th {
 		text-align: left;
-		padding: 0;
+		padding: 0.5rem 0.75rem;
 		border-bottom: 1px solid #2a2f38;
 		font-weight: 500;
 		color: #9aa3b2;
-	}
-
-	.sort-header {
-		display: block;
-		width: 100%;
-		padding: 0.5rem 0.75rem;
-		background: none;
-		border: none;
-		color: inherit;
-		font: inherit;
-		text-align: left;
-		cursor: pointer;
-		user-select: none;
-	}
-
-	.sort-header:hover {
-		background: #161a21;
-		color: #e6e8eb;
 	}
 
 	tbody td {
@@ -172,22 +107,34 @@
 		background: #161a21;
 	}
 
-	.row-running td {
-		color: #f5d36a;
+	a {
+		color: #80a8e6;
+		text-decoration: none;
 	}
-	.row-failed td {
-		color: #f47373;
+	a:hover {
+		text-decoration: underline;
+	}
+	.cta {
+		color: #9aa3b2;
+		font-size: 0.85rem;
 	}
 
-	.mono {
-		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
-		font-size: 0.85rem;
+	.status-running {
+		color: #f5d36a;
+	}
+	.status-failed {
+		color: #f47373;
+	}
+	.status-success {
+		color: #6ad08e;
+	}
+	.status-none {
+		color: #5e6571;
 	}
 
 	.error {
 		color: #f47373;
 	}
-
 	.empty {
 		color: #9aa3b2;
 		font-size: 0.95rem;

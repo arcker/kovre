@@ -7,6 +7,7 @@
 //! `/_admin/*`. The kovre.yaml ↔ runtime sync and the SvelteKit frontend
 //! land in subsequent steps.
 
+pub mod frontend;
 pub mod models;
 pub mod runs;
 pub mod sync;
@@ -130,6 +131,55 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
                 })
             },
         );
+
+        // Serve the embedded SvelteKit frontend.
+        //
+        // GET /              -> index.html (SPA shell)
+        // GET /_app/**       -> hashed assets (JS, CSS, .wasm)
+        // any unknown GET    -> SPA shell (handled by the not-found handler
+        //                       below — SvelteKit owns client-side routing)
+        // unknown /api/*     -> JSON 404 (also via not-found handler so we
+        //                       never accidentally serve HTML to an API client)
+        server = server.with_route(
+            http::Method::GET,
+            "/",
+            |_req| {
+                Box::pin(async move {
+                    Ok(frontend::spa_shell()
+                        .unwrap_or_else(frontend::asset_not_found))
+                })
+            },
+        );
+        server = server.with_route(
+            http::Method::GET,
+            "/_app/**",
+            |req| {
+                Box::pin(async move {
+                    let path = req.uri().path().trim_start_matches('/').to_string();
+                    Ok(frontend::asset_response(&path)
+                        .unwrap_or_else(frontend::asset_not_found))
+                })
+            },
+        );
+
+        server = server.with_not_found_handler(|req| {
+            Box::pin(async move {
+                let path = req.uri().path().to_string();
+                if path.starts_with("/api/")
+                    || path == "/health"
+                    || path == "/ready"
+                    || path == "/info"
+                {
+                    return Ok(json_response(
+                        hyper::StatusCode::NOT_FOUND,
+                        serde_json::json!({"error": "not_found", "path": path}),
+                    ));
+                }
+                // Non-API path with no other handler — serve the SPA shell
+                // and let SvelteKit's client router resolve the URL.
+                Ok(frontend::spa_shell().unwrap_or_else(frontend::asset_not_found))
+            })
+        });
 
         if args.debug {
             server = server.with_admin_panel(true);

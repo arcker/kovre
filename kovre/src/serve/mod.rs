@@ -15,12 +15,19 @@ pub mod sync;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http_body_util::Full;
 use kovre_core::config::Config;
 use lithair_core::http::DeclarativeHttpHandler;
 use lithair_core::LithairServer;
 use tracing::info;
+
+/// Shared, swappable handle on the current `Config`. Phase 3 introduces
+/// it so `PUT /api/config` can replace the running config without a
+/// server restart. Reads are wait-free (`load_full()` returns a fresh
+/// `Arc<Config>`); writes are atomic via `store(Arc::new(new))`.
+pub type ConfigHandle = Arc<ArcSwap<Config>>;
 
 use crate::cli::ServeArgs;
 use crate::serve::models::{JobRun, Snapshot};
@@ -47,7 +54,7 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
     let job_runs_path_str = job_runs_path.to_string_lossy().to_string();
     let snapshots_path = lithair_dir.join("snapshots");
     let snapshots_path_str = snapshots_path.to_string_lossy().to_string();
-    let cfg_arc: Arc<Config> = Arc::new(cfg.clone());
+    let cfg_arc: ConfigHandle = Arc::new(ArcSwap::from_pointee(cfg.clone()));
 
     rt.block_on(async move {
         info!(
@@ -74,7 +81,8 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
 
         // Materialize snapshots from rustic into the projection at boot.
         // Failures per-repo are logged but do not abort startup.
-        let synced = sync_snapshots(&snapshots, &cfg_arc).await;
+        let initial_cfg = cfg_arc.load_full();
+        let synced = sync_snapshots(&snapshots, &initial_cfg).await;
         info!(snapshots = synced, "initial snapshot sync completed");
 
         let mut server = LithairServer::new()
@@ -84,14 +92,19 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
             .with_handler(Arc::clone(&snapshots), "/api/snapshots");
 
         // POST /api/jobs/:name/run — see `serve::runs::trigger_job_run`.
+        // Each route closure captures the `ConfigHandle` (an
+        // `Arc<ArcSwap<Config>>`) and snapshots it on every request via
+        // `load_full()`, which yields the current `Arc<Config>` without
+        // any blocking. This is what makes `PUT /api/config` able to swap
+        // the config at run time and have subsequent requests pick it up.
         let runs_for_route = Arc::clone(&job_runs);
-        let cfg_for_route = Arc::clone(&cfg_arc);
+        let cfg_for_route: ConfigHandle = Arc::clone(&cfg_arc);
         server = server.with_route(
             http::Method::POST,
             "/api/jobs/*/run",
             move |req| {
                 let runs = Arc::clone(&runs_for_route);
-                let cfg = Arc::clone(&cfg_for_route);
+                let cfg = cfg_for_route.load_full();
                 Box::pin(async move { handle_trigger(req, runs, cfg).await })
             },
         );
@@ -100,12 +113,12 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
         // We expose it as a list endpoint (no individual /api/jobs/:name route)
         // because the frontend can filter client-side and we keep the API
         // surface tight.
-        let cfg_for_jobs = Arc::clone(&cfg_arc);
+        let cfg_for_jobs: ConfigHandle = Arc::clone(&cfg_arc);
         server = server.with_route(
             http::Method::GET,
             "/api/jobs",
             move |_req| {
-                let cfg = Arc::clone(&cfg_for_jobs);
+                let cfg = cfg_for_jobs.load_full();
                 Box::pin(async move { Ok(handle_list_jobs(cfg)) })
             },
         );
@@ -115,13 +128,13 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
         // pull in snapshots created out-of-band (e.g. via the CLI) without
         // restarting the server.
         let snapshots_for_sync = Arc::clone(&snapshots);
-        let cfg_for_sync = Arc::clone(&cfg_arc);
+        let cfg_for_sync: ConfigHandle = Arc::clone(&cfg_arc);
         server = server.with_route(
             http::Method::POST,
             "/api/sync",
             move |_req| {
                 let snapshots = Arc::clone(&snapshots_for_sync);
-                let cfg = Arc::clone(&cfg_for_sync);
+                let cfg = cfg_for_sync.load_full();
                 Box::pin(async move {
                     let synced = sync_snapshots(&snapshots, &cfg).await;
                     Ok(json_response(

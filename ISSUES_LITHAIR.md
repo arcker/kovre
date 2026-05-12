@@ -9,7 +9,8 @@ que `ISSUES_RUSTIC.md` côté Phase 1.
 | 1 | `LithairServer` doesn't expose `/health`/`/ready`/`/info` | [lithair/lithair#40](https://github.com/lithair/lithair/issues/40) | ✅ fixed in `v0.2.0` |
 | 2 | `response::json` requires manual `.to_string()` on `serde_json::Value` | [lithair/lithair#47](https://github.com/lithair/lithair/issues/47) | ✅ fixed in `v0.3.0` (`response::json_value`) |
 | 3 | No lightweight `query::param` for single-key extraction | [lithair/lithair#48](https://github.com/lithair/lithair/issues/48) | ✅ fixed in `v0.3.0` (`query::param`) |
-| 4 | `with_route` handler signature exposes hyper types directly | [lithair/lithair#59](https://github.com/lithair/lithair/issues/59) | ⏳ open |
+| 4 | `with_route` handler signature exposes hyper types directly | [lithair/lithair#59](https://github.com/lithair/lithair/issues/59) | ✅ fixed in `v0.4.0` (`RouteRequest`/`RouteResponse`, `with_route_async`) |
+| 5 | `response::*` no custom headers + `with_not_found_handler` lacks `_async` | [lithair/lithair#61](https://github.com/lithair/lithair/issues/61) | ⏳ open |
 
 ## 1. `LithairServer` doesn't expose `/health`, `/ready`, `/info`
 
@@ -51,4 +52,17 @@ Lithair expose `query::parse_query_params` qui parse une query string en `QueryP
 
 `LithairServerBuilder::with_route` exige une closure `Fn(hyper::Request<Incoming>) -> Pin<Box<dyn Future<Output = Result<hyper::Response<Full<Bytes>>>> + Send>>`. Conséquence : tout consumer doit ajouter `bytes`, `http`, `http-body-util`, `hyper` à son `Cargo.toml` juste pour typer ses handlers, plus écrire `Box::pin(async move { ... })` à chaque appel.
 
-**Workaround actif côté kovre :** on **garde** les 4 dépendances directes (`bytes`, `http`, `http-body-util`, `hyper`) et on accepte les `Box::pin` aux call sites. À nettoyer si Lithair expose `RouteRequest`/`RouteResponse` aliases ou un helper `route_async(method, path, async |req| { ... })`.
+**Workaround actif côté kovre :** ~~on garde les 4 dépendances directes~~. Résolu avec `lithair-core v0.4.0` : 8 `Box::pin` éliminés via `with_route_async`, dep `http` droppée, signatures handlers/helpers passent par `RouteRequest`/`RouteResponse`/`Method`/`StatusCode` réexportés. Restent `bytes`/`http-body-util`/`hyper` uniquement parce que `frontend::asset_response` a besoin de `hyper::Response::builder()` pour set `Cache-Control` — cf. issue 5 ci-dessous.
+
+## 5. `response::*` no custom headers + `with_not_found_handler` lacks `_async`
+
+**Phase 3 step:** 2 (refactor post v0.4.0)
+**Détecté contre :** `lithair-core = "0.4.0"`
+**Statut :** ouverte, en attente upstream
+
+Deux gaps cosmétiques restants après le refactor v0.4.0 :
+
+1. `response::json/text/html/json_value` ne permettent pas de set des headers custom (`Cache-Control`, `ETag`, etc.). Conséquence : `serve::frontend::asset_response` retombe sur `hyper::Response::builder()` directement → dep résiduelle sur `bytes` + `http-body-util` + `hyper`.
+2. `with_not_found_handler` n'a pas de variante `_async` comme `with_route_async`. Conséquence : un `Box::pin(async move { ... })` résiduel au seul site `not_found_handler` de `mod.rs`.
+
+**Workarounds actifs côté kovre :** garde les 3 deps (`bytes`, `http-body-util`, `hyper`) uniquement pour `frontend.rs`. Garde le `Box::pin` pour le not-found handler. Tout est documenté inline avec un commentaire référant cette issue.

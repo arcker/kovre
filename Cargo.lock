@@ -2054,7 +2054,6 @@ dependencies = [
  "arc-swap",
  "bytes",
  "clap",
- "http",
  "http-body-util",
  "hyper",
  "indexmap 2.14.0",
@@ -2161,9 +2160,9 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "lithair-core"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "387fd60f6f262d67b84723448e21042a2279ed3b7b59cfea280ee1508436876d"
+checksum = "758a93aeb99c0cd323e219470efc522f75c7e827246ca64269b833efa0fcabcf"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2209,9 +2208,9 @@ dependencies = [
 
 [[package]]
 name = "lithair-macros"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8ab19d55383aa4035ddfab59fe21f066c47008bbb76eb7cf6c06738289571aa"
+checksum = "e05ab5e347018320482194a0225539d39036637e4a0c547a9829f99d4aef4d65"
 dependencies = [
  "proc-macro2",
  "quote",

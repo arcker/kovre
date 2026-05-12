@@ -22,6 +22,7 @@
 
 use bytes::Bytes;
 use http_body_util::Full;
+use lithair_core::app::{response, RouteResponse, StatusCode};
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
@@ -42,11 +43,17 @@ pub fn read_asset(asset_path: &str) -> Option<(Bytes, &'static str)> {
 /// HTTP 200 wrapper around `read_asset`. Returns `None` if the asset
 /// is missing — the caller decides whether that should fall back to
 /// the SPA shell or 404.
-pub fn asset_response(asset_path: &str) -> Option<hyper::Response<Full<Bytes>>> {
+///
+/// Built via `hyper::Response::builder()` directly because Lithair's
+/// `response::*` helpers don't expose custom-header construction (only
+/// Content-Type is settable). We need `Cache-Control` here, hence the
+/// detour through hyper. This is the last code path in kovre that
+/// forces direct deps on `bytes` + `http-body-util` + `hyper`.
+pub fn asset_response(asset_path: &str) -> Option<RouteResponse> {
     let (bytes, mime) = read_asset(asset_path)?;
     Some(
         hyper::Response::builder()
-            .status(hyper::StatusCode::OK)
+            .status(StatusCode::OK)
             .header("content-type", mime)
             // Hashed `_app/immutable/...` paths are content-addressed:
             // safe to cache aggressively. Other paths (index.html,
@@ -67,17 +74,13 @@ pub fn asset_response(asset_path: &str) -> Option<hyper::Response<Full<Bytes>>> 
 /// Serve the SPA shell (`index.html`). Used by the not-found handler
 /// for any GET that is not an API path or an asset — SvelteKit owns
 /// client-side routing from there.
-pub fn spa_shell() -> Option<hyper::Response<Full<Bytes>>> {
+pub fn spa_shell() -> Option<RouteResponse> {
     asset_response("index.html")
 }
 
 /// Plain 404 used when an embedded asset really cannot be found
 /// (e.g. a malformed `_app/...` path) — distinct from the SPA
 /// fallback, which is meant for unknown application routes.
-pub fn asset_not_found() -> hyper::Response<Full<Bytes>> {
-    hyper::Response::builder()
-        .status(hyper::StatusCode::NOT_FOUND)
-        .header("content-type", "text/plain; charset=utf-8")
-        .body(Full::new(Bytes::from_static(b"asset not found")))
-        .expect("static headers never fails")
+pub fn asset_not_found() -> RouteResponse {
+    response::text(StatusCode::NOT_FOUND, "asset not found")
 }

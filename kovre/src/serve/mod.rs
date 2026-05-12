@@ -6,11 +6,6 @@
 //! `POST /api/jobs/:name/run`, and (with `--debug`) the admin panel at
 //! `/_admin/*`. The kovre.yaml ↔ runtime sync and the SvelteKit frontend
 //! land in subsequent steps.
-//!
-//! TODO(lithair#59): direct deps on `bytes`, `http`, `http-body-util`,
-//! `hyper` exist only to type the closures passed to `with_route`. Drop
-//! them as soon as Lithair re-exports `RouteRequest` / `RouteResponse`
-//! type aliases or ships a `Box::pin`-free closure helper.
 
 pub mod frontend;
 pub mod models;
@@ -21,10 +16,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
-use bytes::Bytes;
-use http_body_util::Full;
 use kovre_core::config::Config;
-use lithair_core::app::response;
+use lithair_core::app::{response, Method, RouteRequest, RouteResponse, StatusCode};
 use lithair_core::http::query;
 use lithair_core::http::DeclarativeHttpHandler;
 use lithair_core::LithairServer;
@@ -106,59 +99,43 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
         // the config at run time and have subsequent requests pick it up.
         let runs_for_route = Arc::clone(&job_runs);
         let cfg_for_route: ConfigHandle = Arc::clone(&cfg_arc);
-        server = server.with_route(
-            http::Method::POST,
-            "/api/jobs/*/run",
-            move |req| {
-                let runs = Arc::clone(&runs_for_route);
-                let cfg = cfg_for_route.load_full();
-                Box::pin(async move { handle_trigger(req, runs, cfg).await })
-            },
-        );
+        server = server.with_route_async(Method::POST, "/api/jobs/*/run", move |req| {
+            let runs = Arc::clone(&runs_for_route);
+            let cfg = cfg_for_route.load_full();
+            async move { handle_trigger(req, runs, cfg).await }
+        });
 
         // GET /api/jobs — read-only projection of kovre.yaml's `jobs:` block.
         // We expose it as a list endpoint (no individual /api/jobs/:name route)
         // because the frontend can filter client-side and we keep the API
         // surface tight.
         let cfg_for_jobs: ConfigHandle = Arc::clone(&cfg_arc);
-        server = server.with_route(
-            http::Method::GET,
-            "/api/jobs",
-            move |_req| {
-                let cfg = cfg_for_jobs.load_full();
-                Box::pin(async move { Ok(handle_list_jobs(cfg)) })
-            },
-        );
+        server = server.with_route_async(Method::GET, "/api/jobs", move |_req| {
+            let cfg = cfg_for_jobs.load_full();
+            async move { Ok(handle_list_jobs(cfg)) }
+        });
 
         // GET /api/config — current parsed Config plus a YAML serialization
         // of the same in-memory state. Phase 3's read path for the wizard
         // and the /config view.
         let cfg_for_get_config: ConfigHandle = Arc::clone(&cfg_arc);
-        server = server.with_route(
-            http::Method::GET,
-            "/api/config",
-            move |_req| {
-                let cfg = cfg_for_get_config.load_full();
-                Box::pin(async move { Ok(handle_get_config(cfg)) })
-            },
-        );
+        server = server.with_route_async(Method::GET, "/api/config", move |_req| {
+            let cfg = cfg_for_get_config.load_full();
+            async move { Ok(handle_get_config(cfg)) }
+        });
 
         // GET /api/templates — static catalog of the 4 builtin templates
         // (documents, dev-repos, steam-saves, custom) with their option
         // schema. Drives the gallery on /templates.
-        server = server.with_route(
-            http::Method::GET,
-            "/api/templates",
-            |_req| Box::pin(async move { Ok(handle_list_templates()) }),
-        );
+        server = server.with_route_async(Method::GET, "/api/templates", |_req| async move {
+            Ok(handle_list_templates())
+        });
 
         // GET /api/fs?path=<dir> — list the direct subdirectories of
         // `<dir>`. Backend for the directory autocomplete in the wizard.
-        server = server.with_route(
-            http::Method::GET,
-            "/api/fs",
-            |req| Box::pin(async move { Ok(handle_list_fs(req)) }),
-        );
+        server = server.with_route_async(Method::GET, "/api/fs", |req| async move {
+            Ok(handle_list_fs(req))
+        });
 
         // POST /api/sync — refresh the Snapshot projection on demand.
         // The boot-time sync only runs once; this lets the dashboard
@@ -166,21 +143,17 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
         // restarting the server.
         let snapshots_for_sync = Arc::clone(&snapshots);
         let cfg_for_sync: ConfigHandle = Arc::clone(&cfg_arc);
-        server = server.with_route(
-            http::Method::POST,
-            "/api/sync",
-            move |_req| {
-                let snapshots = Arc::clone(&snapshots_for_sync);
-                let cfg = cfg_for_sync.load_full();
-                Box::pin(async move {
-                    let synced = sync_snapshots(&snapshots, &cfg).await;
-                    Ok(response::json_value(
-                        hyper::StatusCode::OK,
-                        &serde_json::json!({"synced": synced}),
-                    ))
-                })
-            },
-        );
+        server = server.with_route_async(Method::POST, "/api/sync", move |_req| {
+            let snapshots = Arc::clone(&snapshots_for_sync);
+            let cfg = cfg_for_sync.load_full();
+            async move {
+                let synced = sync_snapshots(&snapshots, &cfg).await;
+                Ok(response::json_value(
+                    StatusCode::OK,
+                    &serde_json::json!({"synced": synced}),
+                ))
+            }
+        });
 
         // Serve the embedded SvelteKit frontend.
         //
@@ -190,27 +163,13 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
         //                       below — SvelteKit owns client-side routing)
         // unknown /api/*     -> JSON 404 (also via not-found handler so we
         //                       never accidentally serve HTML to an API client)
-        server = server.with_route(
-            http::Method::GET,
-            "/",
-            |_req| {
-                Box::pin(async move {
-                    Ok(frontend::spa_shell()
-                        .unwrap_or_else(frontend::asset_not_found))
-                })
-            },
-        );
-        server = server.with_route(
-            http::Method::GET,
-            "/_app/**",
-            |req| {
-                Box::pin(async move {
-                    let path = req.uri().path().trim_start_matches('/').to_string();
-                    Ok(frontend::asset_response(&path)
-                        .unwrap_or_else(frontend::asset_not_found))
-                })
-            },
-        );
+        server = server.with_route_async(Method::GET, "/", |_req| async move {
+            Ok(frontend::spa_shell().unwrap_or_else(frontend::asset_not_found))
+        });
+        server = server.with_route_async(Method::GET, "/_app/**", |req| async move {
+            let path = req.uri().path().trim_start_matches('/').to_string();
+            Ok(frontend::asset_response(&path).unwrap_or_else(frontend::asset_not_found))
+        });
 
         server = server.with_not_found_handler(|req| {
             Box::pin(async move {
@@ -221,7 +180,7 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
                     || path == "/info"
                 {
                     return Ok(response::json_value(
-                        hyper::StatusCode::NOT_FOUND,
+                        StatusCode::NOT_FOUND,
                         &serde_json::json!({"error": "not_found", "path": path}),
                     ));
                 }
@@ -251,16 +210,16 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
 ///   - 409 Conflict when another run is in progress (returns the existing run id),
 ///   - 500 Internal Server Error on persistence failure.
 async fn handle_trigger(
-    req: hyper::Request<hyper::body::Incoming>,
+    req: RouteRequest,
     handler: Arc<DeclarativeHttpHandler<JobRun>>,
     cfg: Arc<Config>,
-) -> anyhow::Result<hyper::Response<Full<Bytes>>> {
+) -> anyhow::Result<RouteResponse> {
     let path = req.uri().path().to_string();
     let job_name = match extract_job_name(&path) {
         Some(name) => name,
         None => {
             return Ok(response::json_value(
-                hyper::StatusCode::BAD_REQUEST,
+                StatusCode::BAD_REQUEST,
                 &serde_json::json!({"error": "could not parse job name from path"}),
             ));
         }
@@ -268,19 +227,19 @@ async fn handle_trigger(
 
     match trigger_job_run(handler, cfg, job_name, "dashboard".into()).await {
         Ok(run_id) => Ok(response::json_value(
-            hyper::StatusCode::ACCEPTED,
+            StatusCode::ACCEPTED,
             &serde_json::json!({"id": run_id}),
         )),
         Err(TriggerError::UnknownJob { job }) => Ok(response::json_value(
-            hyper::StatusCode::NOT_FOUND,
+            StatusCode::NOT_FOUND,
             &serde_json::json!({"error": "unknown_job", "job": job}),
         )),
         Err(TriggerError::AlreadyRunning { run_id }) => Ok(response::json_value(
-            hyper::StatusCode::CONFLICT,
+            StatusCode::CONFLICT,
             &serde_json::json!({"error": "already_running", "run_id": run_id}),
         )),
         Err(TriggerError::Persistence { reason }) => Ok(response::json_value(
-            hyper::StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::INTERNAL_SERVER_ERROR,
             &serde_json::json!({"error": "persistence", "reason": reason}),
         )),
     }
@@ -310,19 +269,19 @@ fn extract_job_name(path: &str) -> Option<String> {
 /// it does not preserve user comments or original key ordering on the
 /// disk file. This is documented behavior: the dashboard's view of the
 /// config is its in-memory model, not the raw file.
-fn handle_get_config(cfg: Arc<Config>) -> hyper::Response<Full<Bytes>> {
+fn handle_get_config(cfg: Arc<Config>) -> RouteResponse {
     let yaml = match serde_yaml::to_string(&*cfg) {
         Ok(s) => s,
         Err(e) => {
             return response::json_value(
-                hyper::StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 &serde_json::json!({"error": "yaml_serialize", "reason": e.to_string()}),
             );
         }
     };
     let parsed = serde_json::to_value(&*cfg).unwrap_or(serde_json::Value::Null);
     response::json_value(
-        hyper::StatusCode::OK,
+        StatusCode::OK,
         &serde_json::json!({"yaml": yaml, "parsed": parsed}),
     )
 }
@@ -333,7 +292,7 @@ fn handle_get_config(cfg: Arc<Config>) -> hyper::Response<Full<Bytes>> {
 /// frontend uses to render a form field. `directory` and
 /// `directory_list` types tell the UI to use the autocomplete picker
 /// backed by `GET /api/fs`.
-fn handle_list_templates() -> hyper::Response<Full<Bytes>> {
+fn handle_list_templates() -> RouteResponse {
     let body = serde_json::json!([
         {
             "name": "documents",
@@ -365,7 +324,7 @@ fn handle_list_templates() -> hyper::Response<Full<Bytes>> {
             ]
         }
     ]);
-    response::json_value(hyper::StatusCode::OK, &body)
+    response::json_value(StatusCode::OK, &body)
 }
 
 /// `GET /api/fs?path=<dir>` — list direct subdirectories of `<dir>`.
@@ -379,16 +338,16 @@ fn handle_list_templates() -> hyper::Response<Full<Bytes>> {
 ///
 /// Split into an HTTP wrapper and a pure helper so the policy is unit
 /// testable without constructing a hyper Request.
-fn handle_list_fs(req: hyper::Request<hyper::body::Incoming>) -> hyper::Response<Full<Bytes>> {
+fn handle_list_fs(req: RouteRequest) -> RouteResponse {
     list_fs_for_query(req.uri().query().unwrap_or(""))
 }
 
-fn list_fs_for_query(query: &str) -> hyper::Response<Full<Bytes>> {
+fn list_fs_for_query(query: &str) -> RouteResponse {
     let raw_path = match query::param(query, "path") {
         Some(p) if !p.is_empty() => p,
         _ => {
             return response::json_value(
-                hyper::StatusCode::BAD_REQUEST,
+                StatusCode::BAD_REQUEST,
                 &serde_json::json!({"error": "missing_path", "hint": "GET /api/fs?path=<dir>"}),
             );
         }
@@ -396,7 +355,7 @@ fn list_fs_for_query(query: &str) -> hyper::Response<Full<Bytes>> {
 
     if raw_path.split(['/', '\\']).any(|seg| seg == "..") {
         return response::json_value(
-            hyper::StatusCode::BAD_REQUEST,
+            StatusCode::BAD_REQUEST,
             &serde_json::json!({"error": "path_traversal", "path": raw_path}),
         );
     }
@@ -404,13 +363,13 @@ fn list_fs_for_query(query: &str) -> hyper::Response<Full<Bytes>> {
     let path = std::path::PathBuf::from(&raw_path);
     if !path.exists() {
         return response::json_value(
-            hyper::StatusCode::NOT_FOUND,
+            StatusCode::NOT_FOUND,
             &serde_json::json!({"error": "path_not_found", "path": raw_path}),
         );
     }
     if !path.is_dir() {
         return response::json_value(
-            hyper::StatusCode::BAD_REQUEST,
+            StatusCode::BAD_REQUEST,
             &serde_json::json!({"error": "not_a_directory", "path": raw_path}),
         );
     }
@@ -427,14 +386,14 @@ fn list_fs_for_query(query: &str) -> hyper::Response<Full<Bytes>> {
             .collect(),
         Err(e) => {
             return response::json_value(
-                hyper::StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 &serde_json::json!({"error": "io", "reason": e.to_string(), "path": raw_path}),
             );
         }
     };
 
     response::json_value(
-        hyper::StatusCode::OK,
+        StatusCode::OK,
         &serde_json::json!({"path": raw_path, "entries": entries}),
     )
 }
@@ -445,7 +404,7 @@ fn list_fs_for_query(query: &str) -> hyper::Response<Full<Bytes>> {
 /// This route is read-only on purpose: jobs and repositories live in
 /// the YAML and are the user's source of truth. The dashboard can read
 /// them but cannot mutate them.
-fn handle_list_jobs(cfg: Arc<Config>) -> hyper::Response<Full<Bytes>> {
+fn handle_list_jobs(cfg: Arc<Config>) -> RouteResponse {
     let body: Vec<serde_json::Value> = cfg
         .jobs
         .iter()
@@ -457,7 +416,7 @@ fn handle_list_jobs(cfg: Arc<Config>) -> hyper::Response<Full<Bytes>> {
             value
         })
         .collect();
-    response::json_value(hyper::StatusCode::OK, &serde_json::Value::Array(body))
+    response::json_value(StatusCode::OK, &serde_json::Value::Array(body))
 }
 
 #[cfg(test)]
@@ -498,7 +457,7 @@ mod tests {
     #[test]
     fn handle_list_templates_returns_the_four_known_templates() {
         let resp = handle_list_templates();
-        assert_eq!(resp.status(), hyper::StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::OK);
         let body_bytes = response_body(resp);
         let arr: Vec<serde_json::Value> = serde_json::from_slice(&body_bytes).unwrap();
         let names: Vec<String> = arr
@@ -515,7 +474,7 @@ mod tests {
     fn handle_get_config_round_trips_yaml_and_parsed() {
         let cfg = sample_cfg();
         let resp = handle_get_config(Arc::new(cfg));
-        assert_eq!(resp.status(), hyper::StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(&response_body(resp)).unwrap();
         assert!(body["yaml"].is_string());
         assert!(body["parsed"].is_object());
@@ -535,7 +494,7 @@ mod tests {
         std::fs::write(tempdir.path().join("file.txt"), b"hi").unwrap();
 
         let resp = list_fs_for_query(&fs_query(tempdir.path().to_str().unwrap()));
-        assert_eq!(resp.status(), hyper::StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(&response_body(resp)).unwrap();
         let names: Vec<String> = body["entries"]
             .as_array()
@@ -551,13 +510,13 @@ mod tests {
     #[test]
     fn list_fs_rejects_missing_path() {
         let resp = list_fs_for_query("");
-        assert_eq!(resp.status(), hyper::StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
     fn list_fs_rejects_path_traversal() {
         let resp = list_fs_for_query(&fs_query("C:\\Users\\..\\Windows"));
-        assert_eq!(resp.status(), hyper::StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body: serde_json::Value = serde_json::from_slice(&response_body(resp)).unwrap();
         assert_eq!(body["error"], "path_traversal");
     }
@@ -567,7 +526,7 @@ mod tests {
         let tempdir = tempfile::TempDir::new().unwrap();
         let missing = tempdir.path().join("does-not-exist");
         let resp = list_fs_for_query(&fs_query(missing.to_str().unwrap()));
-        assert_eq!(resp.status(), hyper::StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     // ---- helpers ----
@@ -619,7 +578,7 @@ mod tests {
         format!("path={encoded}")
     }
 
-    fn response_body(resp: hyper::Response<Full<Bytes>>) -> Vec<u8> {
+    fn response_body(resp: RouteResponse) -> Vec<u8> {
         use http_body_util::BodyExt;
         let (_parts, body) = resp.into_parts();
         let rt = tokio::runtime::Builder::new_current_thread()

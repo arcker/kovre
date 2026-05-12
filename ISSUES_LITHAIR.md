@@ -11,6 +11,7 @@ que `ISSUES_RUSTIC.md` côté Phase 1.
 | 3 | No lightweight `query::param` for single-key extraction | [lithair/lithair#48](https://github.com/lithair/lithair/issues/48) | ✅ fixed in `v0.3.0` (`query::param`) |
 | 4 | `with_route` handler signature exposes hyper types directly | [lithair/lithair#59](https://github.com/lithair/lithair/issues/59) | ✅ fixed in `v0.4.0` (`RouteRequest`/`RouteResponse`, `with_route_async`) |
 | 5 | `response::*` no custom headers + `with_not_found_handler` lacks `_async` | [lithair/lithair#61](https://github.com/lithair/lithair/issues/61) | ✅ fixed in `v0.5.0` (`response::builder()`, `with_not_found_handler_async`) |
+| 6 | `RouteRequest` has no Lithair-level body reader | [lithair/lithair#63](https://github.com/lithair/lithair/issues/63) | ⏳ open |
 
 ## 1. `LithairServer` doesn't expose `/health`, `/ready`, `/info`
 
@@ -66,3 +67,13 @@ Deux gaps cosmétiques restants après le refactor v0.4.0 :
 2. `with_not_found_handler` n'a pas de variante `_async` comme `with_route_async`. Conséquence : un `Box::pin(async move { ... })` résiduel au seul site `not_found_handler` de `mod.rs`.
 
 **Workarounds actifs côté kovre :** ~~garde les 3 deps + le `Box::pin`~~. Résolu avec `lithair-core v0.5.0` : `frontend::asset_response` utilise désormais `response::builder().status().header().body()` (drop `bytes`/`http-body-util`/`hyper` de Cargo.toml), et `with_not_found_handler_async` remplace le dernier `Box::pin`. **Kovre n'a plus aucune dépendance directe sur les couches sous Lithair.**
+
+## 6. `RouteRequest` has no Lithair-level body reader
+
+**Phase 3 step:** 3 (`PUT /api/config`)
+**Détecté contre :** `lithair-core = "0.5.0"`
+**Statut :** ouverte, en attente upstream
+
+Pour lire le body d'une `RouteRequest` (ex: le YAML du PUT /api/config), il faut `http_body_util::BodyExt::collect()` — donc ré-ajouter `http-body-util` + `bytes` à kovre/Cargo.toml, exactement les deps qu'on vient de droper en v0.5.0. Aucun helper équivalent à `response::builder()` côté request dans la surface publique de Lithair.
+
+**Workaround actif côté kovre :** aucun, étape 3 mise en pause jusqu'à ce que Lithair expose `request::read_body` ou `request::read_body_as_string`. Voir issue upstream pour les signatures proposées.

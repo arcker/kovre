@@ -20,8 +20,6 @@
 //! build` without touching Node, and CI / release pipelines run
 //! `npm run build` first.
 
-use bytes::Bytes;
-use http_body_util::Full;
 use lithair_core::app::{response, RouteResponse, StatusCode};
 use rust_embed::RustEmbed;
 
@@ -32,27 +30,21 @@ struct Frontend;
 /// Try to read an embedded asset by its path inside `web/build/`.
 /// Returns the bytes plus the guessed MIME type. `None` if the path
 /// is not in the embed.
-pub fn read_asset(asset_path: &str) -> Option<(Bytes, &'static str)> {
+pub fn read_asset(asset_path: &str) -> Option<(Vec<u8>, &'static str)> {
     let asset = Frontend::get(asset_path)?;
     let mime = mime_guess::from_path(asset_path)
         .first_raw()
         .unwrap_or("application/octet-stream");
-    Some((Bytes::from(asset.data.into_owned()), mime))
+    Some((asset.data.into_owned(), mime))
 }
 
 /// HTTP 200 wrapper around `read_asset`. Returns `None` if the asset
 /// is missing — the caller decides whether that should fall back to
 /// the SPA shell or 404.
-///
-/// Built via `hyper::Response::builder()` directly because Lithair's
-/// `response::*` helpers don't expose custom-header construction (only
-/// Content-Type is settable). We need `Cache-Control` here, hence the
-/// detour through hyper. This is the last code path in kovre that
-/// forces direct deps on `bytes` + `http-body-util` + `hyper`.
 pub fn asset_response(asset_path: &str) -> Option<RouteResponse> {
     let (bytes, mime) = read_asset(asset_path)?;
     Some(
-        hyper::Response::builder()
+        response::builder()
             .status(StatusCode::OK)
             .header("content-type", mime)
             // Hashed `_app/immutable/...` paths are content-addressed:
@@ -66,8 +58,7 @@ pub fn asset_response(asset_path: &str) -> Option<RouteResponse> {
                     "public, max-age=300"
                 },
             )
-            .body(Full::new(bytes))
-            .expect("static headers + valid status never fails"),
+            .body(bytes),
     )
 }
 

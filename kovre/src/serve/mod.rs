@@ -171,23 +171,21 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
             Ok(frontend::asset_response(&path).unwrap_or_else(frontend::asset_not_found))
         });
 
-        server = server.with_not_found_handler(|req| {
-            Box::pin(async move {
-                let path = req.uri().path().to_string();
-                if path.starts_with("/api/")
-                    || path == "/health"
-                    || path == "/ready"
-                    || path == "/info"
-                {
-                    return Ok(response::json_value(
-                        StatusCode::NOT_FOUND,
-                        &serde_json::json!({"error": "not_found", "path": path}),
-                    ));
-                }
-                // Non-API path with no other handler — serve the SPA shell
-                // and let SvelteKit's client router resolve the URL.
-                Ok(frontend::spa_shell().unwrap_or_else(frontend::asset_not_found))
-            })
+        server = server.with_not_found_handler_async(|req| async move {
+            let path = req.uri().path().to_string();
+            if path.starts_with("/api/")
+                || path == "/health"
+                || path == "/ready"
+                || path == "/info"
+            {
+                return Ok(response::json_value(
+                    StatusCode::NOT_FOUND,
+                    &serde_json::json!({"error": "not_found", "path": path}),
+                ));
+            }
+            // Non-API path with no other handler — serve the SPA shell
+            // and let SvelteKit's client router resolve the URL.
+            Ok(frontend::spa_shell().unwrap_or_else(frontend::asset_not_found))
         });
 
         if args.debug {
@@ -270,19 +268,27 @@ fn extract_job_name(path: &str) -> Option<String> {
 /// disk file. This is documented behavior: the dashboard's view of the
 /// config is its in-memory model, not the raw file.
 fn handle_get_config(cfg: Arc<Config>) -> RouteResponse {
-    let yaml = match serde_yaml::to_string(&*cfg) {
+    let (status, body) = get_config_data(&cfg);
+    response::json_value(status, &body)
+}
+
+/// Pure policy: serialize the in-memory `Config` to JSON+YAML. Pulled
+/// out of `handle_get_config` so unit tests assert directly on the
+/// payload.
+fn get_config_data(cfg: &Config) -> (StatusCode, serde_json::Value) {
+    let yaml = match serde_yaml::to_string(cfg) {
         Ok(s) => s,
         Err(e) => {
-            return response::json_value(
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &serde_json::json!({"error": "yaml_serialize", "reason": e.to_string()}),
+                serde_json::json!({"error": "yaml_serialize", "reason": e.to_string()}),
             );
         }
     };
-    let parsed = serde_json::to_value(&*cfg).unwrap_or(serde_json::Value::Null);
-    response::json_value(
+    let parsed = serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null);
+    (
         StatusCode::OK,
-        &serde_json::json!({"yaml": yaml, "parsed": parsed}),
+        serde_json::json!({"yaml": yaml, "parsed": parsed}),
     )
 }
 
@@ -293,7 +299,13 @@ fn handle_get_config(cfg: Arc<Config>) -> RouteResponse {
 /// `directory_list` types tell the UI to use the autocomplete picker
 /// backed by `GET /api/fs`.
 fn handle_list_templates() -> RouteResponse {
-    let body = serde_json::json!([
+    response::json_value(StatusCode::OK, &list_templates_data())
+}
+
+/// Pure data computation for `/api/templates`, split out so unit tests
+/// can assert on the JSON without going through hyper bodies.
+fn list_templates_data() -> serde_json::Value {
+    serde_json::json!([
         {
             "name": "documents",
             "icon": "📄",
@@ -323,8 +335,7 @@ fn handle_list_templates() -> RouteResponse {
                 {"key": "excludes", "type": "string_list", "label": "Exclude patterns (glob)", "required": false}
             ]
         }
-    ]);
-    response::json_value(StatusCode::OK, &body)
+    ])
 }
 
 /// `GET /api/fs?path=<dir>` — list direct subdirectories of `<dir>`.
@@ -337,40 +348,44 @@ fn handle_list_templates() -> RouteResponse {
 ///   - exist on disk.
 ///
 /// Split into an HTTP wrapper and a pure helper so the policy is unit
-/// testable without constructing a hyper Request.
+/// testable without going through hyper bodies.
 fn handle_list_fs(req: RouteRequest) -> RouteResponse {
-    list_fs_for_query(req.uri().query().unwrap_or(""))
+    let (status, body) = list_fs_data(req.uri().query().unwrap_or(""));
+    response::json_value(status, &body)
 }
 
-fn list_fs_for_query(query: &str) -> RouteResponse {
+/// Pure policy: parse the query string, walk the file system, return
+/// the response payload paired with the HTTP status the caller should
+/// emit. No HTTP types in scope — easy to unit test.
+fn list_fs_data(query: &str) -> (StatusCode, serde_json::Value) {
     let raw_path = match query::param(query, "path") {
         Some(p) if !p.is_empty() => p,
         _ => {
-            return response::json_value(
+            return (
                 StatusCode::BAD_REQUEST,
-                &serde_json::json!({"error": "missing_path", "hint": "GET /api/fs?path=<dir>"}),
+                serde_json::json!({"error": "missing_path", "hint": "GET /api/fs?path=<dir>"}),
             );
         }
     };
 
     if raw_path.split(['/', '\\']).any(|seg| seg == "..") {
-        return response::json_value(
+        return (
             StatusCode::BAD_REQUEST,
-            &serde_json::json!({"error": "path_traversal", "path": raw_path}),
+            serde_json::json!({"error": "path_traversal", "path": raw_path}),
         );
     }
 
     let path = std::path::PathBuf::from(&raw_path);
     if !path.exists() {
-        return response::json_value(
+        return (
             StatusCode::NOT_FOUND,
-            &serde_json::json!({"error": "path_not_found", "path": raw_path}),
+            serde_json::json!({"error": "path_not_found", "path": raw_path}),
         );
     }
     if !path.is_dir() {
-        return response::json_value(
+        return (
             StatusCode::BAD_REQUEST,
-            &serde_json::json!({"error": "not_a_directory", "path": raw_path}),
+            serde_json::json!({"error": "not_a_directory", "path": raw_path}),
         );
     }
 
@@ -385,16 +400,16 @@ fn list_fs_for_query(query: &str) -> RouteResponse {
             })
             .collect(),
         Err(e) => {
-            return response::json_value(
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &serde_json::json!({"error": "io", "reason": e.to_string(), "path": raw_path}),
+                serde_json::json!({"error": "io", "reason": e.to_string(), "path": raw_path}),
             );
         }
     };
 
-    response::json_value(
+    (
         StatusCode::OK,
-        &serde_json::json!({"path": raw_path, "entries": entries}),
+        serde_json::json!({"path": raw_path, "entries": entries}),
     )
 }
 
@@ -455,12 +470,11 @@ mod tests {
     }
 
     #[test]
-    fn handle_list_templates_returns_the_four_known_templates() {
-        let resp = handle_list_templates();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body_bytes = response_body(resp);
-        let arr: Vec<serde_json::Value> = serde_json::from_slice(&body_bytes).unwrap();
+    fn list_templates_data_returns_the_four_known_templates() {
+        let arr = list_templates_data();
         let names: Vec<String> = arr
+            .as_array()
+            .unwrap()
             .iter()
             .map(|v| v["name"].as_str().unwrap_or("").to_string())
             .collect();
@@ -471,11 +485,10 @@ mod tests {
     }
 
     #[test]
-    fn handle_get_config_round_trips_yaml_and_parsed() {
+    fn get_config_data_round_trips_yaml_and_parsed() {
         let cfg = sample_cfg();
-        let resp = handle_get_config(Arc::new(cfg));
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_slice(&response_body(resp)).unwrap();
+        let (status, body) = get_config_data(&cfg);
+        assert_eq!(status, StatusCode::OK);
         assert!(body["yaml"].is_string());
         assert!(body["parsed"].is_object());
         assert_eq!(body["parsed"]["jobs"]["documents"]["repository"], "test");
@@ -487,15 +500,14 @@ mod tests {
     }
 
     #[test]
-    fn list_fs_lists_subdirectories() {
+    fn list_fs_data_lists_subdirectories() {
         let tempdir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir(tempdir.path().join("alpha")).unwrap();
         std::fs::create_dir(tempdir.path().join("beta")).unwrap();
         std::fs::write(tempdir.path().join("file.txt"), b"hi").unwrap();
 
-        let resp = list_fs_for_query(&fs_query(tempdir.path().to_str().unwrap()));
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_slice(&response_body(resp)).unwrap();
+        let (status, body) = list_fs_data(&fs_query(tempdir.path().to_str().unwrap()));
+        assert_eq!(status, StatusCode::OK);
         let names: Vec<String> = body["entries"]
             .as_array()
             .unwrap()
@@ -508,25 +520,24 @@ mod tests {
     }
 
     #[test]
-    fn list_fs_rejects_missing_path() {
-        let resp = list_fs_for_query("");
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    fn list_fs_data_rejects_missing_path() {
+        let (status, _) = list_fs_data("");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[test]
-    fn list_fs_rejects_path_traversal() {
-        let resp = list_fs_for_query(&fs_query("C:\\Users\\..\\Windows"));
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let body: serde_json::Value = serde_json::from_slice(&response_body(resp)).unwrap();
+    fn list_fs_data_rejects_path_traversal() {
+        let (status, body) = list_fs_data(&fs_query("C:\\Users\\..\\Windows"));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "path_traversal");
     }
 
     #[test]
-    fn list_fs_returns_404_for_missing_dir() {
+    fn list_fs_data_returns_404_for_missing_dir() {
         let tempdir = tempfile::TempDir::new().unwrap();
         let missing = tempdir.path().join("does-not-exist");
-        let resp = list_fs_for_query(&fs_query(missing.to_str().unwrap()));
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let (status, _) = list_fs_data(&fs_query(missing.to_str().unwrap()));
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     // ---- helpers ----
@@ -576,14 +587,5 @@ mod tests {
             }
         }
         format!("path={encoded}")
-    }
-
-    fn response_body(resp: RouteResponse) -> Vec<u8> {
-        use http_body_util::BodyExt;
-        let (_parts, body) = resp.into_parts();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .expect("test runtime");
-        rt.block_on(async move { body.collect().await.unwrap().to_bytes().to_vec() })
     }
 }

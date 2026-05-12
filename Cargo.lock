@@ -2067,6 +2067,7 @@ dependencies = [
  "rustic_core",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "tracing",
@@ -2160,9 +2161,9 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "lithair-core"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0eff48ed7a3d17b6c79feedaa07d7ec732a7be49889fcecfcaa817988513c23b"
+checksum = "387fd60f6f262d67b84723448e21042a2279ed3b7b59cfea280ee1508436876d"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2208,9 +2209,9 @@ dependencies = [
 
 [[package]]
 name = "lithair-macros"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d626147f29095734833945d1b4afbaa380d6b419d20c7ec5009087e4b9e4e60"
+checksum = "e8ab19d55383aa4035ddfab59fe21f066c47008bbb76eb7cf6c06738289571aa"
 dependencies = [
  "proc-macro2",
  "quote",

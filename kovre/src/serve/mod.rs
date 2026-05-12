@@ -6,6 +6,11 @@
 //! `POST /api/jobs/:name/run`, and (with `--debug`) the admin panel at
 //! `/_admin/*`. The kovre.yaml ↔ runtime sync and the SvelteKit frontend
 //! land in subsequent steps.
+//!
+//! TODO(lithair#59): direct deps on `bytes`, `http`, `http-body-util`,
+//! `hyper` exist only to type the closures passed to `with_route`. Drop
+//! them as soon as Lithair re-exports `RouteRequest` / `RouteResponse`
+//! type aliases or ships a `Box::pin`-free closure helper.
 
 pub mod frontend;
 pub mod models;
@@ -19,6 +24,8 @@ use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http_body_util::Full;
 use kovre_core::config::Config;
+use lithair_core::app::response;
+use lithair_core::http::query;
 use lithair_core::http::DeclarativeHttpHandler;
 use lithair_core::LithairServer;
 use tracing::info;
@@ -123,6 +130,36 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
             },
         );
 
+        // GET /api/config — current parsed Config plus a YAML serialization
+        // of the same in-memory state. Phase 3's read path for the wizard
+        // and the /config view.
+        let cfg_for_get_config: ConfigHandle = Arc::clone(&cfg_arc);
+        server = server.with_route(
+            http::Method::GET,
+            "/api/config",
+            move |_req| {
+                let cfg = cfg_for_get_config.load_full();
+                Box::pin(async move { Ok(handle_get_config(cfg)) })
+            },
+        );
+
+        // GET /api/templates — static catalog of the 4 builtin templates
+        // (documents, dev-repos, steam-saves, custom) with their option
+        // schema. Drives the gallery on /templates.
+        server = server.with_route(
+            http::Method::GET,
+            "/api/templates",
+            |_req| Box::pin(async move { Ok(handle_list_templates()) }),
+        );
+
+        // GET /api/fs?path=<dir> — list the direct subdirectories of
+        // `<dir>`. Backend for the directory autocomplete in the wizard.
+        server = server.with_route(
+            http::Method::GET,
+            "/api/fs",
+            |req| Box::pin(async move { Ok(handle_list_fs(req)) }),
+        );
+
         // POST /api/sync — refresh the Snapshot projection on demand.
         // The boot-time sync only runs once; this lets the dashboard
         // pull in snapshots created out-of-band (e.g. via the CLI) without
@@ -137,9 +174,9 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
                 let cfg = cfg_for_sync.load_full();
                 Box::pin(async move {
                     let synced = sync_snapshots(&snapshots, &cfg).await;
-                    Ok(json_response(
+                    Ok(response::json_value(
                         hyper::StatusCode::OK,
-                        serde_json::json!({"synced": synced}),
+                        &serde_json::json!({"synced": synced}),
                     ))
                 })
             },
@@ -183,9 +220,9 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
                     || path == "/ready"
                     || path == "/info"
                 {
-                    return Ok(json_response(
+                    return Ok(response::json_value(
                         hyper::StatusCode::NOT_FOUND,
-                        serde_json::json!({"error": "not_found", "path": path}),
+                        &serde_json::json!({"error": "not_found", "path": path}),
                     ));
                 }
                 // Non-API path with no other handler — serve the SPA shell
@@ -222,29 +259,29 @@ async fn handle_trigger(
     let job_name = match extract_job_name(&path) {
         Some(name) => name,
         None => {
-            return Ok(json_response(
+            return Ok(response::json_value(
                 hyper::StatusCode::BAD_REQUEST,
-                serde_json::json!({"error": "could not parse job name from path"}),
+                &serde_json::json!({"error": "could not parse job name from path"}),
             ));
         }
     };
 
     match trigger_job_run(handler, cfg, job_name, "dashboard".into()).await {
-        Ok(run_id) => Ok(json_response(
+        Ok(run_id) => Ok(response::json_value(
             hyper::StatusCode::ACCEPTED,
-            serde_json::json!({"id": run_id}),
+            &serde_json::json!({"id": run_id}),
         )),
-        Err(TriggerError::UnknownJob { job }) => Ok(json_response(
+        Err(TriggerError::UnknownJob { job }) => Ok(response::json_value(
             hyper::StatusCode::NOT_FOUND,
-            serde_json::json!({"error": "unknown_job", "job": job}),
+            &serde_json::json!({"error": "unknown_job", "job": job}),
         )),
-        Err(TriggerError::AlreadyRunning { run_id }) => Ok(json_response(
+        Err(TriggerError::AlreadyRunning { run_id }) => Ok(response::json_value(
             hyper::StatusCode::CONFLICT,
-            serde_json::json!({"error": "already_running", "run_id": run_id}),
+            &serde_json::json!({"error": "already_running", "run_id": run_id}),
         )),
-        Err(TriggerError::Persistence { reason }) => Ok(json_response(
+        Err(TriggerError::Persistence { reason }) => Ok(response::json_value(
             hyper::StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"error": "persistence", "reason": reason}),
+            &serde_json::json!({"error": "persistence", "reason": reason}),
         )),
     }
 }
@@ -261,48 +298,145 @@ fn extract_job_name(path: &str) -> Option<String> {
     // URL-decode in case the job name contains characters that needed
     // encoding (spaces, accents, etc.). YAML allows them, the URL must
     // round-trip cleanly.
-    Some(percent_decode(name))
+    Some(query::percent_decode(name))
 }
 
-/// Tiny percent-decoder limited to the set we actually expect in job
-/// names. Adding the `percent-encoding` crate just for this would be
-/// overkill given how constrained `kovre.yaml` job names are.
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) =
-                (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2]))
-            {
-                out.push((h << 4) | l);
-                i += 3;
-                continue;
-            }
+/// `GET /api/config` — returns the current in-memory config in two
+/// shapes: a YAML serialization (so the dashboard can show / download
+/// it) and a parsed JSON tree (so forms can populate without re-
+/// parsing). Both reflect the same `Arc<Config>` snapshot.
+///
+/// The YAML emitted here is a re-serialization of the parsed Config —
+/// it does not preserve user comments or original key ordering on the
+/// disk file. This is documented behavior: the dashboard's view of the
+/// config is its in-memory model, not the raw file.
+fn handle_get_config(cfg: Arc<Config>) -> hyper::Response<Full<Bytes>> {
+    let yaml = match serde_yaml::to_string(&*cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            return response::json_value(
+                hyper::StatusCode::INTERNAL_SERVER_ERROR,
+                &serde_json::json!({"error": "yaml_serialize", "reason": e.to_string()}),
+            );
         }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    };
+    let parsed = serde_json::to_value(&*cfg).unwrap_or(serde_json::Value::Null);
+    response::json_value(
+        hyper::StatusCode::OK,
+        &serde_json::json!({"yaml": yaml, "parsed": parsed}),
+    )
 }
 
-fn hex_digit(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
+/// `GET /api/templates` — hard-coded catalog of the 4 templates the
+/// dashboard's wizard knows how to instantiate. The schema is light:
+/// each `option` is a `(key, type, label, required)` tuple the
+/// frontend uses to render a form field. `directory` and
+/// `directory_list` types tell the UI to use the autocomplete picker
+/// backed by `GET /api/fs`.
+fn handle_list_templates() -> hyper::Response<Full<Bytes>> {
+    let body = serde_json::json!([
+        {
+            "name": "documents",
+            "icon": "📄",
+            "description": "Backup the user's Documents, Desktop and Pictures folders.",
+            "options": []
+        },
+        {
+            "name": "dev-repos",
+            "icon": "⚙️",
+            "description": "Find every git repository under a scan root and back them up.",
+            "options": [
+                {"key": "scan_root", "type": "directory", "label": "Scan root", "required": false}
+            ]
+        },
+        {
+            "name": "steam-saves",
+            "icon": "🎮",
+            "description": "Detect Steam via the registry and back up game save folders matched against the Ludusavi manifest.",
+            "options": []
+        },
+        {
+            "name": "custom",
+            "icon": "📂",
+            "description": "Pick one or more folders to back up, with optional exclude patterns.",
+            "options": [
+                {"key": "paths", "type": "directory_list", "label": "Folders to back up", "required": true},
+                {"key": "excludes", "type": "string_list", "label": "Exclude patterns (glob)", "required": false}
+            ]
+        }
+    ]);
+    response::json_value(hyper::StatusCode::OK, &body)
 }
 
-fn json_response(status: hyper::StatusCode, body: serde_json::Value) -> hyper::Response<Full<Bytes>> {
-    let bytes = Bytes::from(body.to_string());
-    hyper::Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(Full::new(bytes))
-        .expect("static headers + valid status never fails")
+/// `GET /api/fs?path=<dir>` — list direct subdirectories of `<dir>`.
+///
+/// Returns a flat structure: `{path, entries: [{name, is_dir}]}`. Files
+/// are filtered out — the picker is a folder picker. `path` must:
+///   - be present (no default; an empty path is rejected),
+///   - not contain a `..` component (defensive guard against path
+///     traversal even though the dashboard binds 127.0.0.1 by default),
+///   - exist on disk.
+///
+/// Split into an HTTP wrapper and a pure helper so the policy is unit
+/// testable without constructing a hyper Request.
+fn handle_list_fs(req: hyper::Request<hyper::body::Incoming>) -> hyper::Response<Full<Bytes>> {
+    list_fs_for_query(req.uri().query().unwrap_or(""))
+}
+
+fn list_fs_for_query(query: &str) -> hyper::Response<Full<Bytes>> {
+    let raw_path = match query::param(query, "path") {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            return response::json_value(
+                hyper::StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "missing_path", "hint": "GET /api/fs?path=<dir>"}),
+            );
+        }
+    };
+
+    if raw_path.split(['/', '\\']).any(|seg| seg == "..") {
+        return response::json_value(
+            hyper::StatusCode::BAD_REQUEST,
+            &serde_json::json!({"error": "path_traversal", "path": raw_path}),
+        );
+    }
+
+    let path = std::path::PathBuf::from(&raw_path);
+    if !path.exists() {
+        return response::json_value(
+            hyper::StatusCode::NOT_FOUND,
+            &serde_json::json!({"error": "path_not_found", "path": raw_path}),
+        );
+    }
+    if !path.is_dir() {
+        return response::json_value(
+            hyper::StatusCode::BAD_REQUEST,
+            &serde_json::json!({"error": "not_a_directory", "path": raw_path}),
+        );
+    }
+
+    let entries: Vec<serde_json::Value> = match std::fs::read_dir(&path) {
+        Ok(it) => it
+            .filter_map(|res| res.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter_map(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|s| serde_json::json!({"name": s, "is_dir": true}))
+            })
+            .collect(),
+        Err(e) => {
+            return response::json_value(
+                hyper::StatusCode::INTERNAL_SERVER_ERROR,
+                &serde_json::json!({"error": "io", "reason": e.to_string(), "path": raw_path}),
+            );
+        }
+    };
+
+    response::json_value(
+        hyper::StatusCode::OK,
+        &serde_json::json!({"path": raw_path, "entries": entries}),
+    )
 }
 
 /// Project `kovre.yaml`'s `jobs:` block to a JSON array, attaching the
@@ -323,7 +457,7 @@ fn handle_list_jobs(cfg: Arc<Config>) -> hyper::Response<Full<Bytes>> {
             value
         })
         .collect();
-    json_response(hyper::StatusCode::OK, serde_json::Value::Array(body))
+    response::json_value(hyper::StatusCode::OK, &serde_json::Value::Array(body))
 }
 
 #[cfg(test)]
@@ -359,5 +493,138 @@ mod tests {
     #[test]
     fn extract_job_name_rejects_unrelated_path() {
         assert!(extract_job_name("/health").is_none());
+    }
+
+    #[test]
+    fn handle_list_templates_returns_the_four_known_templates() {
+        let resp = handle_list_templates();
+        assert_eq!(resp.status(), hyper::StatusCode::OK);
+        let body_bytes = response_body(resp);
+        let arr: Vec<serde_json::Value> = serde_json::from_slice(&body_bytes).unwrap();
+        let names: Vec<String> = arr
+            .iter()
+            .map(|v| v["name"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["documents", "dev-repos", "steam-saves", "custom"]
+        );
+    }
+
+    #[test]
+    fn handle_get_config_round_trips_yaml_and_parsed() {
+        let cfg = sample_cfg();
+        let resp = handle_get_config(Arc::new(cfg));
+        assert_eq!(resp.status(), hyper::StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&response_body(resp)).unwrap();
+        assert!(body["yaml"].is_string());
+        assert!(body["parsed"].is_object());
+        assert_eq!(body["parsed"]["jobs"]["documents"]["repository"], "test");
+
+        // The yaml field should re-parse back to the same Config.
+        let yaml = body["yaml"].as_str().unwrap();
+        let reparsed = Config::from_str(yaml, std::path::Path::new("test.yaml")).unwrap();
+        assert!(reparsed.jobs.contains_key("documents"));
+    }
+
+    #[test]
+    fn list_fs_lists_subdirectories() {
+        let tempdir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tempdir.path().join("alpha")).unwrap();
+        std::fs::create_dir(tempdir.path().join("beta")).unwrap();
+        std::fs::write(tempdir.path().join("file.txt"), b"hi").unwrap();
+
+        let resp = list_fs_for_query(&fs_query(tempdir.path().to_str().unwrap()));
+        assert_eq!(resp.status(), hyper::StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&response_body(resp)).unwrap();
+        let names: Vec<String> = body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"alpha".to_string()));
+        assert!(names.contains(&"beta".to_string()));
+        assert!(!names.contains(&"file.txt".to_string()), "files must be filtered out");
+    }
+
+    #[test]
+    fn list_fs_rejects_missing_path() {
+        let resp = list_fs_for_query("");
+        assert_eq!(resp.status(), hyper::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn list_fs_rejects_path_traversal() {
+        let resp = list_fs_for_query(&fs_query("C:\\Users\\..\\Windows"));
+        assert_eq!(resp.status(), hyper::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = serde_json::from_slice(&response_body(resp)).unwrap();
+        assert_eq!(body["error"], "path_traversal");
+    }
+
+    #[test]
+    fn list_fs_returns_404_for_missing_dir() {
+        let tempdir = tempfile::TempDir::new().unwrap();
+        let missing = tempdir.path().join("does-not-exist");
+        let resp = list_fs_for_query(&fs_query(missing.to_str().unwrap()));
+        assert_eq!(resp.status(), hyper::StatusCode::NOT_FOUND);
+    }
+
+    // ---- helpers ----
+
+    fn sample_cfg() -> Config {
+        use indexmap::IndexMap;
+        use kovre_core::config::{Agent, Job, Repository};
+        use std::path::PathBuf;
+        let mut repositories = IndexMap::new();
+        repositories.insert(
+            "test".into(),
+            Repository {
+                path: PathBuf::from(r"C:\nope"),
+                password_file: PathBuf::from(r"C:\nope.key"),
+            },
+        );
+        let mut jobs = IndexMap::new();
+        jobs.insert(
+            "documents".into(),
+            Job {
+                repository: "test".into(),
+                template: Some("documents".into()),
+                template_options: None,
+                paths: None,
+                excludes: None,
+                retention: None,
+            },
+        );
+        Config {
+            agent: Agent {
+                data_dir: PathBuf::from(r"C:\ProgramData\Kovre"),
+                log_level: "info".into(),
+            },
+            repositories,
+            jobs,
+        }
+    }
+
+    fn fs_query(path: &str) -> String {
+        let mut encoded = String::new();
+        for byte in path.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                    encoded.push(byte as char);
+                }
+                other => encoded.push_str(&format!("%{other:02X}")),
+            }
+        }
+        format!("path={encoded}")
+    }
+
+    fn response_body(resp: hyper::Response<Full<Bytes>>) -> Vec<u8> {
+        use http_body_util::BodyExt;
+        let (_parts, body) = resp.into_parts();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime");
+        rt.block_on(async move { body.collect().await.unwrap().to_bytes().to_vec() })
     }
 }

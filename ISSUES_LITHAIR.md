@@ -7,8 +7,9 @@ que `ISSUES_RUSTIC.md` côté Phase 1.
 | # | Titre court | Upstream | Statut |
 |---|-------------|----------|--------|
 | 1 | `LithairServer` doesn't expose `/health`/`/ready`/`/info` | [lithair/lithair#40](https://github.com/lithair/lithair/issues/40) | ✅ fixed in `v0.2.0` |
-| 2 | `response::json` requires manual `.to_string()` on `serde_json::Value` | [lithair/lithair#47](https://github.com/lithair/lithair/issues/47) | ⏳ open |
-| 3 | No lightweight `query::param` for single-key extraction | [lithair/lithair#48](https://github.com/lithair/lithair/issues/48) | ⏳ open |
+| 2 | `response::json` requires manual `.to_string()` on `serde_json::Value` | [lithair/lithair#47](https://github.com/lithair/lithair/issues/47) | ✅ fixed in `v0.3.0` (`response::json_value`) |
+| 3 | No lightweight `query::param` for single-key extraction | [lithair/lithair#48](https://github.com/lithair/lithair/issues/48) | ✅ fixed in `v0.3.0` (`query::param`) |
+| 4 | `with_route` handler signature exposes hyper types directly | [lithair/lithair#59](https://github.com/lithair/lithair/issues/59) | ⏳ open |
 
 ## 1. `LithairServer` doesn't expose `/health`, `/ready`, `/info`
 
@@ -30,7 +31,7 @@ Aucun workaround dans kovre — on a attendu le release.
 
 `lithair_core::app::response::json(status, body)` prend `impl Into<String>`. Construire des bodies via `serde_json::json!` (le pattern naturel) oblige à `.to_string()` à chaque call site — boilerplate + risque de passer une string non-JSON par accident (le helper met `Content-Type: application/json` quoi qu'il arrive).
 
-**Workaround actif côté kovre :** wrapper local `json_response(status, value)` qui appelle `response::json(status, value.to_string())`. À supprimer dès que Lithair expose `response::json_value` ou équivalent.
+**Workaround actif côté kovre :** ~~wrapper local `json_response(status, value)` qui appelle `response::json(status, value.to_string())`~~. Supprimé une fois Lithair `v0.3.0` dispo — on utilise désormais `response::json_value(status, &value)` directement aux 14 call sites.
 
 ## 3. No lightweight `query::param` for single-key extraction
 
@@ -40,4 +41,14 @@ Aucun workaround dans kovre — on a attendu le release.
 
 Lithair expose `query::parse_query_params` qui parse une query string en `QueryParams` (skip/take/sort/filters). Pour un endpoint qui veut juste *un* paramètre décodé (ex: `path` dans `/api/fs?path=<dir>`), c'est overkill et sémantiquement faux : tout ce qui n'est pas réservé tombe dans `filters` avec un `FilterOp` parsé, donc `path=>foo` serait interprété comme un `Gt` au lieu du littéral.
 
-**Workaround actif côté kovre :** `query_param(query, key) -> Option<String>` privé dans `serve/mod.rs` qui split sur `&` puis appelle `lithair_core::http::query::percent_decode`. À supprimer dès que `query::param` upstream est dispo.
+**Workaround actif côté kovre :** ~~`query_param(query, key) -> Option<String>` privé dans `serve/mod.rs`~~. Supprimé une fois Lithair `v0.3.0` dispo — on utilise `lithair_core::http::query::param(query, key)` directement. Pareil pour le `percent_decode` local qu'on duplicquait : remplacé par `lithair_core::http::query::percent_decode`.
+
+## 4. `with_route` handler signature exposes hyper types directly
+
+**Phase 3 step:** 2 (refactor post v0.3.0)
+**Détecté contre :** `lithair-core = "0.3.0"`
+**Statut :** ouverte, en attente upstream
+
+`LithairServerBuilder::with_route` exige une closure `Fn(hyper::Request<Incoming>) -> Pin<Box<dyn Future<Output = Result<hyper::Response<Full<Bytes>>>> + Send>>`. Conséquence : tout consumer doit ajouter `bytes`, `http`, `http-body-util`, `hyper` à son `Cargo.toml` juste pour typer ses handlers, plus écrire `Box::pin(async move { ... })` à chaque appel.
+
+**Workaround actif côté kovre :** on **garde** les 4 dépendances directes (`bytes`, `http`, `http-body-util`, `hyper`) et on accepte les `Box::pin` aux call sites. À nettoyer si Lithair expose `RouteRequest`/`RouteResponse` aliases ou un helper `route_async(method, path, async |req| { ... })`.

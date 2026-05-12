@@ -11,7 +11,7 @@ que `ISSUES_RUSTIC.md` côté Phase 1.
 | 3 | No lightweight `query::param` for single-key extraction | [lithair/lithair#48](https://github.com/lithair/lithair/issues/48) | ✅ fixed in `v0.3.0` (`query::param`) |
 | 4 | `with_route` handler signature exposes hyper types directly | [lithair/lithair#59](https://github.com/lithair/lithair/issues/59) | ✅ fixed in `v0.4.0` (`RouteRequest`/`RouteResponse`, `with_route_async`) |
 | 5 | `response::*` no custom headers + `with_not_found_handler` lacks `_async` | [lithair/lithair#61](https://github.com/lithair/lithair/issues/61) | ✅ fixed in `v0.5.0` (`response::builder()`, `with_not_found_handler_async`) |
-| 6 | `RouteRequest` has no Lithair-level body reader | [lithair/lithair#63](https://github.com/lithair/lithair/issues/63) | ⏳ open |
+| 6 | `RouteRequest` has no Lithair-level body reader | [lithair/lithair#63](https://github.com/lithair/lithair/issues/63) | ✅ fixed in `v0.6.0` (`request::read_body{,_with_limit,_as_string,_json}`) |
 
 ## 1. `LithairServer` doesn't expose `/health`, `/ready`, `/info`
 
@@ -76,4 +76,4 @@ Deux gaps cosmétiques restants après le refactor v0.4.0 :
 
 Pour lire le body d'une `RouteRequest` (ex: le YAML du PUT /api/config), il faut `http_body_util::BodyExt::collect()` — donc ré-ajouter `http-body-util` + `bytes` à kovre/Cargo.toml, exactement les deps qu'on vient de droper en v0.5.0. Aucun helper équivalent à `response::builder()` côté request dans la surface publique de Lithair.
 
-**Workaround actif côté kovre :** aucun, étape 3 mise en pause jusqu'à ce que Lithair expose `request::read_body` ou `request::read_body_as_string`. Voir issue upstream pour les signatures proposées.
+**Workaround actif côté kovre :** ~~aucun, étape 3 mise en pause~~. Résolu avec `lithair-core v0.6.0` qui livre `request::read_body`, `read_body_with_limit`, `read_body_as_string`, et `read_body_json::<T>`. Étape 3 (PUT /api/config) implémentée avec `read_body_with_limit(req, 256 KiB)` + validation `Config::from_str` + `atomicwrites` + `ArcSwap::store`. Pas une seule ligne de body-reading custom dans kovre.

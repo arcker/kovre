@@ -40,7 +40,7 @@ use crate::serve::sync::sync_snapshots;
 /// whole binary in `#[tokio::main]`: the CLI subcommands (`run`, `list-jobs`,
 /// …) stay synchronous and pay no runtime startup cost. Only `serve` needs
 /// async, and only `serve` builds a runtime.
-pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
+pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -123,6 +123,20 @@ pub fn run(cfg: &Config, args: ServeArgs) -> Result<()> {
             let cfg = cfg_for_get_config.load_full();
             async move { Ok(handle_get_config(cfg)) }
         });
+
+        // PUT /api/config — accepts a YAML body, validates it via
+        // `Config::from_str`, writes the file atomically, and swaps
+        // the in-memory `ArcSwap` so subsequent requests see the new
+        // config without a server restart. On parse error the file is
+        // never touched and the in-memory state stays put.
+        let cfg_for_put_config: ConfigHandle = Arc::clone(&cfg_arc);
+        let path_for_put_config = config_path.clone();
+        server =
+            server.with_route_async(Method::PUT, "/api/config", move |req| {
+                let swap = Arc::clone(&cfg_for_put_config);
+                let path = path_for_put_config.clone();
+                async move { Ok(handle_put_config(req, swap, path).await) }
+            });
 
         // GET /api/templates — static catalog of the 4 builtin templates
         // (documents, dev-repos, steam-saves, custom) with their option
@@ -290,6 +304,109 @@ fn get_config_data(cfg: &Config) -> (StatusCode, serde_json::Value) {
         StatusCode::OK,
         serde_json::json!({"yaml": yaml, "parsed": parsed}),
     )
+}
+
+/// `PUT /api/config` — replace `kovre.yaml` with the request body,
+/// reload the running config in-place.
+///
+/// Validates the YAML through `Config::from_str` before touching the
+/// disk. On parse failure: the file is left untouched, the running
+/// config is unchanged, and the response carries line/column from
+/// `serde_yaml::Error::location()` so the dashboard can show a
+/// precise error. On success: writes atomically (via `atomicwrites`,
+/// rename-from-tmp pattern), then swaps the `ArcSwap` — every
+/// subsequent request reads the new config without a server restart.
+///
+/// Body limit: 256 KiB. kovre.yaml never exceeds a few KB in practice;
+/// the limit exists to reject obviously-wrong uploads up front rather
+/// than allocate a multi-MB string.
+async fn handle_put_config(
+    req: RouteRequest,
+    swap: ConfigHandle,
+    config_path: std::path::PathBuf,
+) -> RouteResponse {
+    use lithair_core::app::request;
+
+    const MAX_BODY: usize = 256 * 1024;
+    let yaml = match request::read_body_with_limit(req, MAX_BODY).await {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                return response::json_value(
+                    StatusCode::BAD_REQUEST,
+                    &serde_json::json!({"error": "non_utf8_body", "reason": e.to_string()}),
+                );
+            }
+        },
+        Err(e) => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "read_body", "reason": e.to_string()}),
+            );
+        }
+    };
+
+    let (status, body) = put_config_data(&yaml, &config_path, &swap);
+    response::json_value(status, &body)
+}
+
+/// Pure policy: validate, write, swap. Split from the HTTP wrapper so
+/// unit tests can drive it without spinning up Lithair.
+fn put_config_data(
+    yaml: &str,
+    config_path: &std::path::Path,
+    swap: &ConfigHandle,
+) -> (StatusCode, serde_json::Value) {
+    use kovre_core::config::ConfigError;
+
+    // 1. Validate. Don't touch disk or memory if this fails.
+    let new_cfg = match Config::from_str(yaml, config_path) {
+        Ok(c) => c,
+        Err(ConfigError::Parse { source, .. }) => {
+            let location = source.location().map(|loc| {
+                serde_json::json!({"line": loc.line(), "column": loc.column()})
+            });
+            return (
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "error": "yaml_parse",
+                    "message": source.to_string(),
+                    "location": location,
+                }),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "error": "config_validation",
+                    "message": e.to_string(),
+                }),
+            );
+        }
+    };
+
+    // 2. Persist atomically. `atomicwrites` writes to a sibling temp
+    //    file then renames over the target, so a crash mid-write never
+    //    leaves a truncated kovre.yaml on disk.
+    use atomicwrites::{AllowOverwrite, AtomicFile};
+    use std::io::Write;
+    let af = AtomicFile::new(config_path, AllowOverwrite);
+    if let Err(e) = af.write(|f| f.write_all(yaml.as_bytes())) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "io_write", "message": e.to_string()}),
+        );
+    }
+
+    // 3. Live swap. Reads on subsequent requests pick this up via
+    //    `cfg_handle.load_full()` (wait-free thanks to ArcSwap).
+    swap.store(Arc::new(new_cfg.clone()));
+
+    // 4. Return the new config, in the same shape as GET /api/config,
+    //    so the dashboard can refresh its local view in one round-trip.
+    let (_, body) = get_config_data(&new_cfg);
+    (StatusCode::OK, body)
 }
 
 /// `GET /api/templates` — hard-coded catalog of the 4 templates the
@@ -538,6 +655,123 @@ mod tests {
         let missing = tempdir.path().join("does-not-exist");
         let (status, _) = list_fs_data(&fs_query(missing.to_str().unwrap()));
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ---- PUT /api/config ----
+
+    /// A self-consistent YAML that we can write to disk + reload.
+    fn valid_yaml(data_dir: &str) -> String {
+        format!(
+            "agent:\n  data_dir: {data_dir}\n  log_level: info\nrepositories:\n  test:\n    path: {data_dir}\n    password_file: {data_dir}/k.key\njobs:\n  files:\n    repository: test\n    paths:\n      - {data_dir}/source\n",
+            data_dir = data_dir,
+        )
+    }
+
+    fn put_config_fixture() -> (tempfile::TempDir, std::path::PathBuf, ConfigHandle) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg_path = dir.path().join("kovre.yaml");
+        let initial = valid_yaml(dir.path().to_str().unwrap());
+        std::fs::write(&cfg_path, &initial).unwrap();
+        let initial_cfg = Config::from_str(&initial, &cfg_path).unwrap();
+        let swap: ConfigHandle = Arc::new(ArcSwap::from_pointee(initial_cfg));
+        (dir, cfg_path, swap)
+    }
+
+    #[test]
+    fn put_config_accepts_valid_yaml_writes_and_swaps() {
+        let (dir, cfg_path, swap) = put_config_fixture();
+
+        // Build a new YAML that adds a second job.
+        let mut updated = valid_yaml(dir.path().to_str().unwrap());
+        updated.push_str("  docs:\n    template: documents\n    repository: test\n");
+
+        let (status, body) = put_config_data(&updated, &cfg_path, &swap);
+        assert_eq!(status, StatusCode::OK, "body: {body:#}");
+
+        // File on disk now matches what we sent.
+        let on_disk = std::fs::read_to_string(&cfg_path).unwrap();
+        assert_eq!(on_disk, updated);
+
+        // In-memory swap saw the new job.
+        let now = swap.load_full();
+        assert!(now.jobs.contains_key("docs"));
+        assert!(now.jobs.contains_key("files"));
+    }
+
+    #[test]
+    fn put_config_rejects_malformed_yaml() {
+        let (_dir, cfg_path, swap) = put_config_fixture();
+        let snapshot_before = swap.load_full();
+
+        let broken = "agent: !!! this is :: not yaml";
+        let (status, body) = put_config_data(broken, &cfg_path, &swap);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Either yaml_parse or config_validation depending on which
+        // layer rejected it; both are acceptable for malformed input.
+        let kind = body["error"].as_str().unwrap_or("");
+        assert!(
+            kind == "yaml_parse" || kind == "config_validation",
+            "unexpected error kind: {kind} (body={body:#})"
+        );
+
+        // Disk and memory both untouched.
+        let on_disk = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(on_disk.contains("files:"), "disk YAML was mutated despite parse error");
+        assert!(Arc::ptr_eq(&snapshot_before, &swap.load_full()));
+    }
+
+    #[test]
+    fn put_config_reports_yaml_location_when_available() {
+        let (_dir, cfg_path, swap) = put_config_fixture();
+        // Tab in indentation — serde_yaml flags the exact line.
+        let broken =
+            "agent:\n\tdata_dir: x\nrepositories: {}\njobs: {}\n";
+        let (status, body) = put_config_data(broken, &cfg_path, &swap);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "yaml_parse");
+        let loc = &body["location"];
+        assert!(loc.is_object(), "location missing: {body:#}");
+        assert!(loc["line"].as_u64().is_some());
+    }
+
+    #[test]
+    fn put_config_rejects_validation_error_keeps_state() {
+        let (dir, cfg_path, swap) = put_config_fixture();
+        let snapshot_before = swap.load_full();
+
+        // Parses fine but references an unknown repository.
+        let invalid = format!(
+            "agent:\n  data_dir: {data_dir}\n  log_level: info\nrepositories:\n  test:\n    path: {data_dir}\n    password_file: {data_dir}/k.key\njobs:\n  oops:\n    template: documents\n    repository: ghost\n",
+            data_dir = dir.path().to_str().unwrap(),
+        );
+        let (status, body) = put_config_data(&invalid, &cfg_path, &swap);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "config_validation");
+
+        // Disk + memory unchanged.
+        let on_disk = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(on_disk.contains("files:"));
+        assert!(!on_disk.contains("oops:"));
+        assert!(Arc::ptr_eq(&snapshot_before, &swap.load_full()));
+    }
+
+    #[test]
+    fn put_config_round_trip_via_get_config() {
+        let (dir, cfg_path, swap) = put_config_fixture();
+
+        // Round-trip: read the current in-memory YAML via the GET helper,
+        // PUT it back, then re-GET. Should arrive at the same content.
+        let snapshot = swap.load_full();
+        let (_, first) = get_config_data(&snapshot);
+        let yaml_v1 = first["yaml"].as_str().unwrap().to_string();
+
+        let (status, _) = put_config_data(&yaml_v1, &cfg_path, &swap);
+        assert_eq!(status, StatusCode::OK);
+
+        let snapshot2 = swap.load_full();
+        let (_, second) = get_config_data(&snapshot2);
+        let yaml_v2 = second["yaml"].as_str().unwrap();
+        assert_eq!(yaml_v1, yaml_v2, "round-trip diverged");
     }
 
     // ---- helpers ----

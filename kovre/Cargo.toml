@@ -9,10 +9,11 @@ publish = false
 [dependencies]
 anyhow = "1.0.102"
 arc-swap = "1.7.1"
+atomicwrites = "0.4.4"
 clap = { version = "4", features = ["derive"] }
 jiff = "0.2.24"
 kovre-core = { path = "../kovre-core" }
-lithair-core = { version = "0.5.0", features = ["admin-ui"] }
+lithair-core = { version = "0.6.0", features = ["admin-ui"] }
 mime_guess = "2.0.5"
 rust-embed = "8.7.2"
 serde = { version = "1.0.228", features = ["derive"] }

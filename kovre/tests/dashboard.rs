@@ -52,7 +52,7 @@ fn yaml_path(p: &Path) -> String {
 }
 
 struct Fixture {
-    _workspace: TempDir,
+    workspace: TempDir,
     config: PathBuf,
 }
 
@@ -98,10 +98,7 @@ impl Fixture {
             String::from_utf8_lossy(&init.stderr)
         );
 
-        Self {
-            _workspace: workspace,
-            config,
-        }
+        Self { workspace, config }
     }
 }
 
@@ -229,6 +226,23 @@ fn post_status(agent: &ureq::Agent, path: &str) -> (u16, serde_json::Value) {
     }
 }
 
+fn put_yaml(agent: &ureq::Agent, path: &str, body: &str) -> (u16, serde_json::Value) {
+    let resp = agent
+        .put(&url(path))
+        .set("content-type", "application/yaml")
+        .send_string(body);
+    match resp {
+        Ok(r) => {
+            let s = r.status();
+            (s, r.into_json().unwrap_or(serde_json::json!({})))
+        }
+        Err(ureq::Error::Status(code, r)) => {
+            (code, r.into_json().unwrap_or(serde_json::json!({})))
+        }
+        Err(e) => panic!("PUT {path}: {e}"),
+    }
+}
+
 #[test]
 fn dashboard_end_to_end() {
     let fx = Fixture::build();
@@ -344,4 +358,104 @@ fn dashboard_end_to_end() {
             other => panic!("/_admin probe failed: {other}"),
         });
     assert_eq!(admin_status, 200, "--debug should enable /_admin");
+
+    // ---- Phase 3 read-only API ----
+
+    // GET /api/templates — the four builtin templates, in stable order.
+    let templates = get_json(&a, "/api/templates");
+    let names: Vec<String> = templates
+        .as_array()
+        .expect("templates is array")
+        .iter()
+        .map(|t| t["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["documents", "dev-repos", "steam-saves", "custom"]
+    );
+
+    // GET /api/fs — the workspace root contains the source/repo/data
+    // directories the fixture created.
+    let workspace_path = fx.workspace.path().to_string_lossy().into_owned();
+    let fs = get_json(
+        &a,
+        &format!("/api/fs?path={}", urlencode(&workspace_path)),
+    );
+    let entries: Vec<String> = fs["entries"]
+        .as_array()
+        .expect("entries is array")
+        .iter()
+        .map(|e| e["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    for expected in ["source", "repo", "data"] {
+        assert!(
+            entries.contains(&expected.to_string()),
+            "/api/fs should list `{expected}` under the workspace (got {entries:?})"
+        );
+    }
+
+    // GET /api/config — yaml + parsed mirror what the server holds in
+    // memory.
+    let cfg_before = get_json(&a, "/api/config");
+    assert!(cfg_before["yaml"].is_string());
+    let yaml_before = cfg_before["yaml"].as_str().unwrap().to_string();
+    assert!(yaml_before.contains("files:"));
+    assert!(!yaml_before.contains("added_by_test:"));
+
+    // ---- Phase 3 PUT /api/config: invalid YAML stays out ----
+    let (status_bad, body_bad) = put_yaml(&a, "/api/config", "agent: !!! not yaml");
+    assert_eq!(status_bad, 400);
+    let err_kind = body_bad["error"].as_str().unwrap_or("");
+    assert!(
+        err_kind == "yaml_parse" || err_kind == "config_validation",
+        "unexpected error kind on bad YAML: {err_kind} (body={body_bad:#})"
+    );
+
+    // The bad PUT must not have mutated state.
+    let cfg_check = get_json(&a, "/api/config");
+    assert_eq!(cfg_check["yaml"].as_str().unwrap(), yaml_before);
+
+    // ---- Phase 3 PUT /api/config: valid YAML reloads live ----
+    let mut yaml_after = yaml_before.trim_end().to_string();
+    yaml_after.push_str("\n  added_by_test:\n    template: documents\n    repository: test\n");
+
+    let (status_ok, body_ok) = put_yaml(&a, "/api/config", &yaml_after);
+    assert_eq!(status_ok, 200, "PUT response: {body_ok:#}");
+    assert!(
+        body_ok["parsed"]["jobs"]["added_by_test"].is_object(),
+        "response should reflect the newly-added job: {body_ok:#}"
+    );
+
+    // GET /api/jobs sees it without a restart (ArcSwap live reload).
+    let jobs_after = get_json(&a, "/api/jobs");
+    let job_names: Vec<String> = jobs_after
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(
+        job_names.contains(&"added_by_test".into()) && job_names.contains(&"files".into()),
+        "live reload missed the new job: {job_names:?}"
+    );
+
+    // The file on disk got rewritten atomically.
+    let on_disk = std::fs::read_to_string(&fx.config).expect("read kovre.yaml");
+    assert!(on_disk.contains("added_by_test:"));
+    assert!(on_disk.contains("files:"));
+}
+
+/// Minimal URL-encoder for path values (Windows backslash, colon,
+/// spaces). Avoids pulling a percent-encoding crate just for one test.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(byte as char);
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }

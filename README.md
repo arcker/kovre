@@ -7,6 +7,7 @@ Configuration déclarative YAML, moteur [`rustic_core`](https://crates.io/crates
 
 - **Phase 1 (moteur CLI)** — terminée.
 - **Phase 2 (dashboard web)** — terminée. Sous-commande `kovre serve` qui sert un SPA SvelteKit + l'API JSON Lithair, le tout depuis un seul `kovre.exe`.
+- **Phase 3 (édition de config via l'UI)** — terminée. Galerie de templates, wizards par template, écriture atomique de `kovre.yaml`, rechargement à chaud via `ArcSwap` — aucun redémarrage de serveur.
 
 Service Windows, scheduler intégré, support VSS, restore via UI, notifications : phases ultérieures.
 
@@ -92,10 +93,12 @@ kovre serve --debug                    # active le panneau /_admin de Lithair
 
 Routes :
 
-- `/` — vue d'ensemble (jobs depuis `kovre.yaml` + dernier run par job)
-- `/jobs/:name` — détails d'un job + bouton **Run now** + filtre runs/snapshots
+- `/` — vue d'ensemble (tiles par job + dernier run + bouton **Run now**)
+- `/jobs/:name` — détails d'un job + filtre runs/snapshots
 - `/snapshots/:job/:id` — métadonnées d'un snapshot
 - `/runs` — historique global (tri par colonne via WebAssembly)
+- `/templates` — galerie des 4 templates pour ajouter un nouveau job
+- `/templates/:name` — wizard du template, écrit `kovre.yaml` et recharge à chaud
 - `/about` — version, health, endpoints
 
 API JSON :
@@ -103,8 +106,12 @@ API JSON :
 - `GET /api/jobs` — projection read-only de `kovre.yaml::jobs`
 - `GET /api/job_runs[/:id]` — historique des runs (CRUD auto-généré par Lithair)
 - `GET /api/snapshots[/:id]` — projection des snapshots rustic
+- `GET /api/config` — `{yaml, parsed}` reflétant la config en mémoire
+- `GET /api/templates` — catalogue des 4 templates (documents, dev-repos, steam-saves, custom) avec leur schéma d'options
+- `GET /api/fs?path=<dir>` — liste les sous-dossiers de `<dir>` (autocomplete du picker)
 - `POST /api/jobs/:name/run` — déclenche un backup, retourne `{"id":"..."}` (202) ; 409 si un run est déjà en cours
 - `POST /api/sync` — re-projette les snapshots depuis rustic (pour récupérer ceux créés en CLI sans redémarrer)
+- `PUT /api/config` — accepte un YAML brut, valide via `Config::from_str`, écrit atomiquement et swap l'`ArcSwap` ; 400 avec `{error, message, location: {line, column}}` si invalide
 - `/health`, `/ready`, `/info` — endpoints opérationnels Lithair
 
 Persistence dashboard : `<agent.data_dir>/lithair/{job_runs,snapshots}/*.raftlog` (event-sourced, replay au boot).
@@ -132,12 +139,19 @@ Un job peut aussi être déclaré sans template : il faut alors fournir `paths` 
 
 ### Phase 2 (dashboard)
 
-- **Le YAML reste source de vérité.** Le dashboard ne permet pas d'éditer `kovre.yaml`. Toute modification se fait dans le fichier puis nécessite un redémarrage du serveur.
 - **Pas de restore via l'UI.** Les snapshots sont visibles, le dashboard affiche la commande `rustic restore` à utiliser.
 - **Pas de logs live d'un run en cours.** Le bouton **Run now** poll toutes les 2s jusqu'à fin. SSE/WebSocket viendront plus tard.
-- **Pas d'auth quand `--bind 127.0.0.1`** (default). Pour un bind LAN, prévoir un reverse-proxy authentifié devant — l'auth bearer-token côté kovre n'est pas implémentée en Phase 2.
+- **Pas d'auth quand `--bind 127.0.0.1`** (default). Pour un bind LAN, prévoir un reverse-proxy authentifié devant — l'auth bearer-token côté kovre n'est pas implémentée.
 - **Sync snapshots = boot + on-demand.** Un `kovre run` lancé en CLI pendant que `kovre serve` tourne ne fait PAS apparaître automatiquement le snapshot dans le dashboard ; cliquer le bouton **↻ Refresh** dans le header (équivalent à `POST /api/sync`).
 - **CLI vs dashboard décorrélés.** Un `kovre run` CLI crée un snapshot rustic mais **pas** de `JobRun` dans la pipeline dashboard ; seuls les runs déclenchés via `POST /api/jobs/:name/run` apparaissent dans `/runs`.
+
+### Phase 3 (édition config via l'UI)
+
+- **Le YAML reste l'artefact final** — la dashboard l'écrit mais le fichier est aussi éditable à la main avec n'importe quel éditeur.
+- **Édition raw du YAML non exposée** — la galerie `/templates` permet d'ajouter des jobs, mais il n'y a pas de textarea libre dans l'UI. Pour modifier `agent:`, `repositories:`, ou supprimer un job existant : éditer `kovre.yaml` à la main. Le serveur recharge à chaque PUT, mais une modif disque externe demande encore un restart (`--watch-config` est non implémenté).
+- **Comments perdus à l'édition UI.** Un PUT depuis le dashboard remplace le fichier ; les commentaires manuels du YAML disparaissent. Le block ajouté par le wizard reste en forme canonique (2-space indent, scalars quotés sur Windows paths / globs).
+- **Modification / suppression de jobs existants** non exposée dans l'UI — le wizard ne sait qu'ajouter. À la main dans le YAML pour le reste.
+- **Validation YAML côté client minimale** — le wizard vérifie juste nom unique + champs requis. La vraie validation (champ inconnu, repo référencé inexistant, etc.) revient du serveur en `400` avec ligne/colonne.
 
 ## Restore
 
@@ -168,21 +182,21 @@ robocopy C:\Users\<you>\Documents C:\restore-test\Documents /L /MIR /NJH /NJS
 
 ## Tests
 
-Le workspace tourne 84 tests :
+Le workspace tourne 95 tests :
 
 ```sh
-cargo test                     # 84 tests, ~3-4 min sur Windows
+cargo test                     # 95 tests, ~3-4 min sur Windows
 cargo test --test dashboard    # le e2e du dashboard seul (~1 min)
 cargo test --test integration  # les tests Phase 1 (~3 min)
 cargo test -p kovre-wasm       # logique de tri WASM (instantané)
 ```
 
-Le test `dashboard` spawn le binaire kovre, attaque ses endpoints HTTP, et vérifie le flux complet (run → success → snapshot synced → SPA shell servie). Il a besoin de `web/build/` peuplé pour valider la SPA — sinon les assertions sur le shell HTML échouent avec un message qui pointe vers `npm run build`.
+Le test `dashboard` spawn le binaire kovre, attaque ses endpoints HTTP, et vérifie le flux complet : run → success → snapshot synced → SPA shell servie, puis Phase 3 (GET /api/templates, GET /api/fs, PUT /api/config valide → live reload, PUT /api/config invalide → 400 sans mutation). Il a besoin de `web/build/` peuplé pour valider la SPA — sinon les assertions sur le shell HTML échouent avec un message qui pointe vers `npm run build`.
 
 ## Issues remontées upstream
 
 - [`ISSUES_RUSTIC.md`](ISSUES_RUSTIC.md) — 5 issues sur `rustic_core` (README outdated, exclude semantics, sanitize fail-all, RFC 9557 timestamp, jiff leaked dep).
-- [`ISSUES_LITHAIR.md`](ISSUES_LITHAIR.md) — 1 issue sur Lithair, fixée en v0.2.0 (built-in `/health`, `/ready`, `/info`).
+- [`ISSUES_LITHAIR.md`](ISSUES_LITHAIR.md) — 6 issues filed sur Lithair, toutes fixées entre v0.2.0 et v0.6.0 (built-in `/health`/`/ready`/`/info` ; `response::json_value` ; `query::param` ; `RouteRequest`/`RouteResponse` + `with_route_async` ; `response::builder()` + `with_not_found_handler_async` ; `request::read_body{,_with_limit,_as_string,_json}`). kovre n'a aucune dépendance directe sur les couches sous Lithair.
 
 ## Licence
 

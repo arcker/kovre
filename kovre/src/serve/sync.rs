@@ -37,12 +37,12 @@ pub async fn sync_snapshots(
             continue;
         };
 
-        // `list_snapshots_for_job` is sync (rustic_core's API); push it
-        // off the reactor.
+        // `BackupEngine::list_snapshots` is sync (rustic_core's API
+        // underneath); push it off the reactor.
         let job_name_owned = job_name.clone();
         let repo_owned = repo.clone();
         let result = tokio::task::spawn_blocking(move || {
-            backup::list_snapshots_for_job(&repo_owned, &job_name_owned)
+            backup::engine_for(&repo_owned).list_snapshots(&job_name_owned)
         })
         .await;
 
@@ -127,16 +127,16 @@ mod tests {
             password_file: password_file.clone(),
         };
 
-        kbackup::init_repo(&repo_cfg).unwrap();
-        kbackup::backup_job(
-            &repo_cfg,
-            job_name,
-            BackupSource {
-                paths: vec![source.clone()],
-                excludes: vec![],
-            },
-        )
-        .unwrap();
+        kbackup::engine_for(&repo_cfg).init().unwrap();
+        kbackup::engine_for(&repo_cfg)
+            .backup(
+                job_name,
+                BackupSource {
+                    paths: vec![source.clone()],
+                    excludes: vec![],
+                },
+            )
+            .unwrap();
 
         let mut repositories = IndexMap::new();
         repositories.insert("test".into(), repo_cfg);

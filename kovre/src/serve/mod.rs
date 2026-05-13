@@ -506,7 +506,8 @@ async fn handle_init_repo(req: RouteRequest, cfg: Arc<Config>) -> RouteResponse 
         }
     };
 
-    let result = tokio::task::spawn_blocking(move || kovre_core::backup::init_repo(&repo)).await;
+    let result =
+        tokio::task::spawn_blocking(move || kovre_core::backup::engine_for(&repo).init()).await;
     match result {
         Ok(Ok(())) => response::json_value(
             StatusCode::OK,

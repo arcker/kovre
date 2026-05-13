@@ -1,23 +1,33 @@
-//! Wrapper around `rustic_core` — the only module in kovre that knows about rustic types.
+//! Backup engine abstraction.
 //!
-//! All snapshots produced by kovre are tagged `kovre-job:<job-name>` so that
-//! `list-snapshots <job>` can filter them out of a shared repository.
+//! Phase 4 introduces a `BackupEngine` trait so the runtime can pick
+//! between several persistence formats per repository. The previous
+//! top-level free functions (`init_repo`, `backup_job`, …) are now
+//! methods on a `RusticEngine` impl; a second `MirrorEngine` lands in
+//! step 3 of the phase. Callers obtain an engine via the
+//! [`engine_for`] factory, which inspects the repository's declared
+//! backend.
+//!
+//! All snapshots produced by `RusticEngine` are tagged
+//! `kovre-job:<job-name>` so a shared repository can host several
+//! jobs without their snapshot lists overlapping.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use rustic_backend::BackendOptions;
 use jiff::Zoned;
+use rustic_backend::BackendOptions;
 use rustic_core::{
-    BackupOptions, ConfigOptions, Credentials, KeepOptions, KeyOptions, PathList, Repository,
-    RepositoryBackends, RepositoryOptions, SnapshotOptions,
-    repofile::SnapshotFile,
+    repofile::SnapshotFile, BackupOptions, ConfigOptions, Credentials, KeepOptions, KeyOptions,
+    PathList, Repository, RepositoryBackends, RepositoryOptions, SnapshotOptions,
 };
 use tracing::{info, warn};
 
 use crate::config::{Repository as RepoConfig, Retention};
 
-/// Tag prefix kovre attaches to every snapshot it creates so we can later filter by job.
+/// Tag prefix kovre attaches to every rustic snapshot so we can later
+/// filter by job. Mirror snapshots don't carry this tag (the engine
+/// does not produce snapshots in the rustic sense).
 pub const JOB_TAG_PREFIX: &str = "kovre-job:";
 
 /// What kovre wants to back up: a list of source paths plus exclude globs.
@@ -27,8 +37,10 @@ pub struct BackupSource {
     pub excludes: Vec<String>,
 }
 
-/// Domain-level summary of a snapshot — kept independent of rustic types so the CLI
-/// (and any future UI) doesn't have to import rustic_core.
+/// Domain-level summary of a snapshot — kept independent of rustic types so
+/// the CLI (and the dashboard) doesn't have to import `rustic_core`.
+/// Engines that don't have a notion of snapshot (the mirror backend)
+/// fabricate one per backup run from the `JobRun` metadata.
 #[derive(Debug, Clone)]
 pub struct SnapshotInfo {
     pub id: String,
@@ -40,214 +52,269 @@ pub struct SnapshotInfo {
     pub data_added: Option<u64>,
 }
 
-fn read_password(repo: &RepoConfig) -> Result<String> {
-    let raw = std::fs::read_to_string(&repo.password_file).with_context(|| {
-        format!("reading password file `{}`", repo.password_file.display())
-    })?;
-    let pass = raw.lines().next().unwrap_or("").trim_end().to_string();
-    if pass.is_empty() {
-        anyhow::bail!(
-            "password file `{}` is empty",
-            repo.password_file.display()
-        );
-    }
-    Ok(pass)
-}
-
-fn make_backends(repo: &RepoConfig) -> Result<RepositoryBackends> {
-    let path = repo.path.to_string_lossy().to_string();
-    BackendOptions::default()
-        .repository(path.clone())
-        .to_backends()
-        .with_context(|| format!("opening backend at `{path}`"))
-}
-
-fn credentials(repo: &RepoConfig) -> Result<Credentials> {
-    Ok(Credentials::Password(read_password(repo)?))
-}
-
-/// Initialise a brand-new repository on the configured backend.
-///
-/// Fails if a repository already exists at that location.
-pub fn init_repo(repo: &RepoConfig) -> Result<()> {
-    let backends = make_backends(repo)?;
-    let creds = credentials(repo)?;
-    let opts = RepositoryOptions::default();
-
-    Repository::new(&opts, &backends)
-        .context("creating repository handle")?
-        .init(&creds, &KeyOptions::default(), &ConfigOptions::default())
-        .context("initializing repository on backend")?;
-
-    info!(repository = %repo.path.display(), "repository initialized");
-    Ok(())
-}
-
-/// Create a snapshot of `source` in the given repository, tagged for `job_name`.
-pub fn backup_job(
-    repo: &RepoConfig,
-    job_name: &str,
-    source: BackupSource,
-) -> Result<SnapshotInfo> {
-    let backends = make_backends(repo)?;
-    let creds = credentials(repo)?;
-    let opts = RepositoryOptions::default();
-
-    let repository = Repository::new(&opts, &backends)
-        .context("creating repository handle")?
-        .open(&creds)
-        .context("opening repository (wrong password?)")?
-        .to_indexed_ids()
-        .context("loading repository index")?;
-
-    let mut backup_opts = BackupOptions::default();
-    // rustic's `Excludes::globs` are passed to `ignore::OverrideBuilder`, which uses
-    // *whitelist* semantics — bare patterns mean "include only matches, exclude
-    // everything else". We expose the more intuitive "exclude these" semantics to
-    // users (matching the YAML field name `excludes:` and restic conventions),
-    // so we negate every pattern here.
-    backup_opts.excludes.globs = source
-        .excludes
-        .into_iter()
-        .map(|p| if p.starts_with('!') { p } else { format!("!{p}") })
-        .collect();
-
-    // Drop paths that don't exist — common in template-resolved job sources
-    // (e.g. Steam saves for games that have never been launched, or a Pictures
-    // folder on a fresh Windows install). `PathList::sanitize` calls
-    // `canonicalize` which is fail-all-or-nothing, so a single missing path
-    // would otherwise abort the whole job.
-    let existing: Vec<PathBuf> = source
-        .paths
-        .into_iter()
-        .filter(|p| {
-            let ok = p.exists();
-            if !ok {
-                warn!(path = %p.display(), "source path does not exist, skipping");
-            }
-            ok
-        })
-        .collect();
-    if existing.is_empty() {
-        anyhow::bail!("no source paths exist on this system — nothing to back up");
-    }
-
-    let pathlist: PathList = existing.iter().cloned().collect();
-    let pathlist = pathlist.sanitize().context("sanitizing source paths")?;
-
-    let snap = SnapshotOptions::default()
-        .add_tags(&format!("{JOB_TAG_PREFIX}{job_name}"))
-        .context("setting snapshot tag")?
-        .to_snapshot()
-        .context("building snapshot record")?;
-
-    info!(job = job_name, paths = ?existing, "starting backup");
-    let snap = repository
-        .backup(&backup_opts, &pathlist, snap)
-        .context("running backup")?;
-    info!(
-        job = job_name,
-        snapshot = %snap.id,
-        bytes = snap.summary.as_ref().map(|s| s.total_bytes_processed),
-        "backup complete"
-    );
-
-    Ok(snap_to_info(snap))
-}
-
-/// List snapshots in the repository whose tag matches the given job name.
-pub fn list_snapshots_for_job(repo: &RepoConfig, job_name: &str) -> Result<Vec<SnapshotInfo>> {
-    let backends = make_backends(repo)?;
-    let creds = credentials(repo)?;
-    let opts = RepositoryOptions::default();
-
-    let repository = Repository::new(&opts, &backends)
-        .context("creating repository handle")?
-        .open(&creds)
-        .context("opening repository (wrong password?)")?;
-
-    let target_tag = format!("{JOB_TAG_PREFIX}{job_name}");
-    let mut snaps: Vec<SnapshotInfo> = repository
-        .get_all_snapshots()
-        .context("listing snapshots")?
-        .into_iter()
-        .filter(|s| s.tags.contains(&target_tag))
-        .map(snap_to_info)
-        .collect();
-    // Newest first — SnapshotFile::time is a Zoned, so we sort by the formatted RFC3339 string,
-    // which is lexically chronological.
-    snaps.sort_by(|a, b| b.time.cmp(&a.time));
-    Ok(snaps)
-}
-
-/// Outcome of applying retention to a single job's snapshots.
+/// Outcome of applying retention to a single job's history.
 #[derive(Debug, Clone, Default)]
 pub struct RetentionOutcome {
     pub kept: usize,
     pub forgotten: usize,
 }
 
-/// Apply retention rules to all snapshots tagged for `job_name`. Snapshots that
-/// the rules don't keep are deleted (forgotten). Note: this does not run a
-/// repository-wide prune — dead pack data remains until the user runs
-/// `rustic prune` separately.
-pub fn apply_retention(
-    repo: &RepoConfig,
-    job_name: &str,
-    retention: &Retention,
-) -> Result<RetentionOutcome> {
-    let keep = build_keep_options(retention);
-    if !any_rule_set(retention) {
-        return Ok(RetentionOutcome::default());
-    }
+/// Backup engine — the abstraction every backend implements.
+///
+/// Implementations are expected to be cheap to construct (they hold a
+/// reference to the `RepoConfig`, no I/O at construction time) but may
+/// be long-running on the actual operations.
+pub trait BackupEngine: Send + Sync {
+    /// Materialize the repository on disk. For rustic, runs `init`. For
+    /// mirror (Phase 4 step 3), creates the destination directory.
+    /// Engines that detect an already-initialized repo return an error
+    /// the caller can match on (rustic surfaces "config file already
+    /// exists"); the dashboard treats that as 409 `already_initialized`.
+    fn init(&self) -> Result<()>;
 
-    let backends = make_backends(repo)?;
-    let creds = credentials(repo)?;
-    let opts = RepositoryOptions::default();
+    /// Run a backup for `job_name` against `source`. Returns a snapshot
+    /// summary (synthesized for engines without a native snapshot
+    /// concept).
+    fn backup(&self, job_name: &str, source: BackupSource) -> Result<SnapshotInfo>;
 
-    let repository = Repository::new(&opts, &backends)
-        .context("creating repository handle")?
-        .open(&creds)
-        .context("opening repository (wrong password?)")?;
+    /// Enumerate the snapshots known for this job. Mirror returns an
+    /// empty vec — its history lives in `.versions/` rather than as
+    /// discrete snapshots.
+    fn list_snapshots(&self, job_name: &str) -> Result<Vec<SnapshotInfo>>;
 
-    let target_tag = format!("{JOB_TAG_PREFIX}{job_name}");
-    let snapshots: Vec<SnapshotFile> = repository
-        .get_all_snapshots()
-        .context("listing snapshots for retention")?
-        .into_iter()
-        .filter(|s| s.tags.contains(&target_tag))
-        .collect();
-
-    if snapshots.is_empty() {
-        return Ok(RetentionOutcome::default());
-    }
-
-    let now = Zoned::now();
-    let evaluated = keep
-        .apply(snapshots, &now)
-        .context("evaluating retention rules")?;
-
-    let mut to_forget = Vec::new();
-    let mut kept = 0usize;
-    for s in &evaluated {
-        if s.keep {
-            kept += 1;
-        } else {
-            to_forget.push(s.snapshot.id);
-        }
-    }
-
-    if !to_forget.is_empty() {
-        repository
-            .delete_snapshots(&to_forget)
-            .context("deleting forgotten snapshots")?;
-    }
-
-    Ok(RetentionOutcome {
-        kept,
-        forgotten: to_forget.len(),
-    })
+    /// Apply retention rules. Rustic interprets the `keep_*` count
+    /// fields (`keep_last`, `keep_daily`, …) over snapshots; mirror
+    /// reads `keep_versions` and prunes its `.versions/` tree.
+    fn apply_retention(
+        &self,
+        job_name: &str,
+        retention: &Retention,
+    ) -> Result<RetentionOutcome>;
 }
+
+/// Pick the right engine for a repository, based on its `backend:`
+/// declaration in `kovre.yaml`.
+///
+/// Phase 4 step 1 only knows rustic — the schema extension that adds
+/// the `backend` field comes in step 2. For now every repository is
+/// served by `RusticEngine`.
+pub fn engine_for(repo: &RepoConfig) -> Box<dyn BackupEngine> {
+    Box::new(RusticEngine::new(repo.clone()))
+}
+
+// ---------------------------------------------------------------------
+// RusticEngine
+// ---------------------------------------------------------------------
+
+/// Backup engine backed by `rustic_core`. Stores deduplicated,
+/// encrypted, restic-compatible snapshots at the configured path.
+pub struct RusticEngine {
+    repo: RepoConfig,
+}
+
+impl RusticEngine {
+    pub fn new(repo: RepoConfig) -> Self {
+        Self { repo }
+    }
+
+    fn read_password(&self) -> Result<String> {
+        let raw = std::fs::read_to_string(&self.repo.password_file).with_context(|| {
+            format!(
+                "reading password file `{}`",
+                self.repo.password_file.display()
+            )
+        })?;
+        let pass = raw.lines().next().unwrap_or("").trim_end().to_string();
+        if pass.is_empty() {
+            anyhow::bail!(
+                "password file `{}` is empty",
+                self.repo.password_file.display()
+            );
+        }
+        Ok(pass)
+    }
+
+    fn make_backends(&self) -> Result<RepositoryBackends> {
+        let path = self.repo.path.to_string_lossy().to_string();
+        BackendOptions::default()
+            .repository(path.clone())
+            .to_backends()
+            .with_context(|| format!("opening backend at `{path}`"))
+    }
+
+    fn credentials(&self) -> Result<Credentials> {
+        Ok(Credentials::Password(self.read_password()?))
+    }
+}
+
+impl BackupEngine for RusticEngine {
+    fn init(&self) -> Result<()> {
+        let backends = self.make_backends()?;
+        let creds = self.credentials()?;
+        let opts = RepositoryOptions::default();
+
+        Repository::new(&opts, &backends)
+            .context("creating repository handle")?
+            .init(&creds, &KeyOptions::default(), &ConfigOptions::default())
+            .context("initializing repository on backend")?;
+
+        info!(repository = %self.repo.path.display(), "repository initialized");
+        Ok(())
+    }
+
+    fn backup(&self, job_name: &str, source: BackupSource) -> Result<SnapshotInfo> {
+        let backends = self.make_backends()?;
+        let creds = self.credentials()?;
+        let opts = RepositoryOptions::default();
+
+        let repository = Repository::new(&opts, &backends)
+            .context("creating repository handle")?
+            .open(&creds)
+            .context("opening repository (wrong password?)")?
+            .to_indexed_ids()
+            .context("loading repository index")?;
+
+        let mut backup_opts = BackupOptions::default();
+        // rustic's `Excludes::globs` are passed to `ignore::OverrideBuilder`,
+        // which uses *whitelist* semantics — bare patterns mean "include
+        // only matches, exclude everything else". We expose the more
+        // intuitive "exclude these" semantics (matching the YAML field
+        // name `excludes:` and restic conventions), so we negate every
+        // pattern.
+        backup_opts.excludes.globs = source
+            .excludes
+            .into_iter()
+            .map(|p| if p.starts_with('!') { p } else { format!("!{p}") })
+            .collect();
+
+        // Drop paths that don't exist — common in template-resolved
+        // job sources (Steam saves for games never launched, Pictures
+        // on a fresh Windows install). `PathList::sanitize` calls
+        // `canonicalize` which is fail-all-or-nothing.
+        let existing: Vec<PathBuf> = source
+            .paths
+            .into_iter()
+            .filter(|p| {
+                let ok = p.exists();
+                if !ok {
+                    warn!(path = %p.display(), "source path does not exist, skipping");
+                }
+                ok
+            })
+            .collect();
+        if existing.is_empty() {
+            anyhow::bail!("no source paths exist on this system — nothing to back up");
+        }
+
+        let pathlist: PathList = existing.iter().cloned().collect();
+        let pathlist = pathlist.sanitize().context("sanitizing source paths")?;
+
+        let snap = SnapshotOptions::default()
+            .add_tags(&format!("{JOB_TAG_PREFIX}{job_name}"))
+            .context("setting snapshot tag")?
+            .to_snapshot()
+            .context("building snapshot record")?;
+
+        info!(job = job_name, paths = ?existing, "starting backup");
+        let snap = repository
+            .backup(&backup_opts, &pathlist, snap)
+            .context("running backup")?;
+        info!(
+            job = job_name,
+            snapshot = %snap.id,
+            bytes = snap.summary.as_ref().map(|s| s.total_bytes_processed),
+            "backup complete"
+        );
+
+        Ok(snap_to_info(snap))
+    }
+
+    fn list_snapshots(&self, job_name: &str) -> Result<Vec<SnapshotInfo>> {
+        let backends = self.make_backends()?;
+        let creds = self.credentials()?;
+        let opts = RepositoryOptions::default();
+
+        let repository = Repository::new(&opts, &backends)
+            .context("creating repository handle")?
+            .open(&creds)
+            .context("opening repository (wrong password?)")?;
+
+        let target_tag = format!("{JOB_TAG_PREFIX}{job_name}");
+        let mut snaps: Vec<SnapshotInfo> = repository
+            .get_all_snapshots()
+            .context("listing snapshots")?
+            .into_iter()
+            .filter(|s| s.tags.contains(&target_tag))
+            .map(snap_to_info)
+            .collect();
+        // Newest first — `SnapshotFile::time` formats RFC3339, which is
+        // lexically chronological.
+        snaps.sort_by(|a, b| b.time.cmp(&a.time));
+        Ok(snaps)
+    }
+
+    fn apply_retention(
+        &self,
+        job_name: &str,
+        retention: &Retention,
+    ) -> Result<RetentionOutcome> {
+        let keep = build_keep_options(retention);
+        if !any_rule_set(retention) {
+            return Ok(RetentionOutcome::default());
+        }
+
+        let backends = self.make_backends()?;
+        let creds = self.credentials()?;
+        let opts = RepositoryOptions::default();
+
+        let repository = Repository::new(&opts, &backends)
+            .context("creating repository handle")?
+            .open(&creds)
+            .context("opening repository (wrong password?)")?;
+
+        let target_tag = format!("{JOB_TAG_PREFIX}{job_name}");
+        let snapshots: Vec<SnapshotFile> = repository
+            .get_all_snapshots()
+            .context("listing snapshots for retention")?
+            .into_iter()
+            .filter(|s| s.tags.contains(&target_tag))
+            .collect();
+
+        if snapshots.is_empty() {
+            return Ok(RetentionOutcome::default());
+        }
+
+        let now = Zoned::now();
+        let evaluated = keep
+            .apply(snapshots, &now)
+            .context("evaluating retention rules")?;
+
+        let mut to_forget = Vec::new();
+        let mut kept = 0usize;
+        for s in &evaluated {
+            if s.keep {
+                kept += 1;
+            } else {
+                to_forget.push(s.snapshot.id);
+            }
+        }
+
+        if !to_forget.is_empty() {
+            repository
+                .delete_snapshots(&to_forget)
+                .context("deleting forgotten snapshots")?;
+        }
+
+        Ok(RetentionOutcome {
+            kept,
+            forgotten: to_forget.len(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------
+// rustic helpers (private)
+// ---------------------------------------------------------------------
 
 fn build_keep_options(r: &Retention) -> KeepOptions {
     KeepOptions::default()
@@ -266,6 +333,18 @@ fn any_rule_set(r: &Retention) -> bool {
         || r.keep_weekly.is_some()
         || r.keep_monthly.is_some()
         || r.keep_yearly.is_some()
+}
+
+fn snap_to_info(s: SnapshotFile) -> SnapshotInfo {
+    SnapshotInfo {
+        id: s.id.to_string(),
+        time: s.time.to_string(),
+        paths: s.paths.iter().cloned().collect(),
+        hostname: s.hostname,
+        tags: s.tags.iter().cloned().collect(),
+        total_bytes_processed: s.summary.as_ref().map(|sum| sum.total_bytes_processed),
+        data_added: s.summary.as_ref().map(|sum| sum.data_added),
+    }
 }
 
 #[cfg(test)]
@@ -315,16 +394,14 @@ mod tests {
             ..Default::default()
         }));
     }
-}
 
-fn snap_to_info(s: SnapshotFile) -> SnapshotInfo {
-    SnapshotInfo {
-        id: s.id.to_string(),
-        time: s.time.to_string(),
-        paths: s.paths.iter().cloned().collect(),
-        hostname: s.hostname,
-        tags: s.tags.iter().cloned().collect(),
-        total_bytes_processed: s.summary.as_ref().map(|sum| sum.total_bytes_processed),
-        data_added: s.summary.as_ref().map(|sum| sum.data_added),
+    #[test]
+    fn engine_for_returns_rustic_engine_by_default() {
+        use std::path::PathBuf;
+        let repo = RepoConfig {
+            path: PathBuf::from(r"C:\nope"),
+            password_file: PathBuf::from(r"C:\nope.key"),
+        };
+        let _engine = engine_for(&repo); // boxed trait object; just check it constructs
     }
 }

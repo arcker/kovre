@@ -195,7 +195,8 @@ fn run_one(cfg: &Config, name: &str) -> Result<()> {
         paths: resolved.paths,
         excludes: resolved.excludes,
     };
-    let snap = backup::backup_job(repo, name, source)
+    let snap = backup::engine_for(repo)
+        .backup(name, source)
         .with_context(|| format!("running job `{name}`"))?;
 
     info!(
@@ -206,7 +207,7 @@ fn run_one(cfg: &Config, name: &str) -> Result<()> {
     );
 
     if let Some(retention) = &job.retention {
-        match backup::apply_retention(repo, name, retention) {
+        match backup::engine_for(repo).apply_retention(name, retention) {
             Ok(outcome) => {
                 if outcome.forgotten > 0 || outcome.kept > 0 {
                     info!(
@@ -236,7 +237,8 @@ fn cmd_list_snapshots(cfg: &Config, job_name: &str) -> Result<()> {
         .get(&job.repository)
         .with_context(|| format!("job `{job_name}` references unknown repository `{}`", job.repository))?;
 
-    let snaps = backup::list_snapshots_for_job(repo, job_name)
+    let snaps = backup::engine_for(repo)
+        .list_snapshots(job_name)
         .with_context(|| format!("listing snapshots for job `{job_name}`"))?;
 
     if snaps.is_empty() {
@@ -303,7 +305,9 @@ fn cmd_init_repo(cfg: &Config, repository: &str) -> Result<()> {
         .with_context(|| format!("unknown repository `{repository}`"))?;
 
     info!(repository = repository, path = %repo.path.display(), "initializing repository");
-    backup::init_repo(repo).with_context(|| format!("initializing repository `{repository}`"))?;
+    backup::engine_for(repo)
+        .init()
+        .with_context(|| format!("initializing repository `{repository}`"))?;
     println!(
         "repository `{repository}` initialized at `{}`",
         repo.path.display()

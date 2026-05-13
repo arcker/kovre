@@ -201,7 +201,7 @@ jobs:
 
 #[test]
 fn retention_keep_last_forgets_older_snapshots() {
-    use kovre_core::backup::{BackupSource, apply_retention, backup_job, list_snapshots_for_job};
+    use kovre_core::backup::{engine_for, BackupSource};
     use kovre_core::config::{Repository as RepoConfig, Retention};
 
     let workspace = TempDir::new().unwrap();
@@ -220,36 +220,38 @@ fn retention_keep_last_forgets_older_snapshots() {
         password_file: password_file.clone(),
     };
 
-    kovre_core::backup::init_repo(&repo_cfg).unwrap();
+    engine_for(&repo_cfg).init().unwrap();
 
     // Create 5 snapshots back-to-back. Each iteration mutates the source so
     // the new snapshot is meaningfully distinct (rustic still creates a snapshot
     // even with identical content, but writing a new byte exercises the index too).
     for i in 0..5 {
         fs::write(source.join("a.txt"), format!("a{i}")).unwrap();
-        backup_job(
-            &repo_cfg,
-            "job1",
-            BackupSource {
-                paths: vec![source.clone()],
-                excludes: vec![],
-            },
-        )
-        .unwrap();
+        engine_for(&repo_cfg)
+            .backup(
+                "job1",
+                BackupSource {
+                    paths: vec![source.clone()],
+                    excludes: vec![],
+                },
+            )
+            .unwrap();
     }
 
-    let before = list_snapshots_for_job(&repo_cfg, "job1").unwrap();
+    let before = engine_for(&repo_cfg).list_snapshots("job1").unwrap();
     assert_eq!(before.len(), 5, "expected 5 snapshots before retention");
 
     let retention = Retention {
         keep_last: Some(2),
         ..Default::default()
     };
-    let outcome = apply_retention(&repo_cfg, "job1", &retention).unwrap();
+    let outcome = engine_for(&repo_cfg)
+        .apply_retention("job1", &retention)
+        .unwrap();
     assert_eq!(outcome.kept, 2, "outcome.kept");
     assert_eq!(outcome.forgotten, 3, "outcome.forgotten");
 
-    let after = list_snapshots_for_job(&repo_cfg, "job1").unwrap();
+    let after = engine_for(&repo_cfg).list_snapshots("job1").unwrap();
     assert_eq!(after.len(), 2, "snapshots remaining after retention");
 }
 

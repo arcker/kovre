@@ -201,9 +201,11 @@ async fn run_backup(
         excludes: resolved.excludes,
     };
     let job_name_owned = job_name.to_string();
-    tokio::task::spawn_blocking(move || backup::backup_job(&repo, &job_name_owned, source))
-        .await
-        .map_err(|e| anyhow::anyhow!("backup task panicked: {e}"))?
+    tokio::task::spawn_blocking(move || {
+        backup::engine_for(&repo).backup(&job_name_owned, source)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("backup task panicked: {e}"))?
 }
 
 /// Current time as a clean RFC 3339 string in UTC (no RFC 9557 brackets).

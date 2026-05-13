@@ -70,6 +70,67 @@ export const listJobRuns = (): Promise<JobRun[]> => getList<JobRun>('/api/job_ru
 export const listSnapshots = (): Promise<Snapshot[]> => getList<Snapshot>('/api/snapshots');
 export const listJobs = (): Promise<Job[]> => getJson<Job[]>('/api/jobs');
 
+// --- Phase 3: templates + config edition --------------------------------
+
+export interface TemplateOption {
+	key: string;
+	type: 'directory' | 'directory_list' | 'string_list';
+	label: string;
+	required: boolean;
+}
+
+export interface Template {
+	name: string;
+	icon: string;
+	description: string;
+	options: TemplateOption[];
+}
+
+export interface FsEntry {
+	name: string;
+	is_dir: boolean;
+}
+
+export interface FsListing {
+	path: string;
+	entries: FsEntry[];
+}
+
+export interface ConfigPayload {
+	yaml: string;
+	parsed: {
+		agent: { data_dir: string; log_level: string };
+		repositories: Record<string, { path: string; password_file: string }>;
+		jobs: Record<string, unknown>;
+	};
+}
+
+export const listTemplates = (): Promise<Template[]> => getJson<Template[]>('/api/templates');
+
+export const listFs = (path: string): Promise<FsListing> =>
+	getJson<FsListing>(`/api/fs?path=${encodeURIComponent(path)}`);
+
+export const getConfig = (): Promise<ConfigPayload> => getJson<ConfigPayload>('/api/config');
+
+/** Replace the running config. Server validates the YAML before
+ *  touching the file or the in-memory state; on failure the response
+ *  body carries the parse error and the optional line/column. */
+export async function putConfig(yaml: string): Promise<ConfigPayload> {
+	const resp = await fetch('/api/config', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/yaml' },
+		body: yaml
+	});
+	const body = await resp.json().catch(() => ({}) as Record<string, unknown>);
+	if (resp.status === 200) {
+		return body as ConfigPayload;
+	}
+	const message = typeof body.message === 'string' ? body.message : `HTTP ${resp.status}`;
+	const location = body.location as { line?: number; column?: number } | undefined;
+	const where = location?.line != null ? ` (line ${location.line}, col ${location.column ?? '?'})` : '';
+	throw new Error(`${message}${where}`);
+}
+
 /** Trigger a backup. Resolves to the new run id, or throws with a
  *  reason that includes the existing run id when 409 Conflict. */
 export async function triggerRun(jobName: string): Promise<string> {

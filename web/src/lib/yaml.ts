@@ -1,15 +1,31 @@
-// Tiny YAML emitter scoped to kovre's job schema.
+// Minimal YAML emitter scoped to kovre's config schema.
 //
-// We don't pull in a full client-side YAML library: the only emission
-// the dashboard does is appending a single job entry to an existing
-// kovre.yaml whose shape is well known (Phase 1 schema, validated
-// server-side on PUT). String concatenation is enough.
-//
-// Note: comments and unusual formatting in the existing YAML are
-// preserved up to the appended block, but the appended block itself is
-// canonicalized (2-space indent, no comments, list-of-strings as
-// hyphenated entries). This matches what the server emits after any
-// subsequent PUT.
+// The previous Phase 3 version (`appendJobToYaml`) preserved the
+// existing YAML text and only canonicalized the appended block. With
+// edit/delete operations landing in Phase 3.5, that surface-mutation
+// approach breaks down — we now own the full file. Every PUT
+// rebuilds the YAML from the parsed structure, so comments are lost
+// on the first edit through the UI (documented in README).
+
+export interface ParsedConfig {
+	agent: { data_dir: string; log_level: string };
+	repositories: Record<string, RepositoryEntry>;
+	jobs: Record<string, JobEntry>;
+}
+
+export interface RepositoryEntry {
+	path: string;
+	password_file: string;
+}
+
+export interface JobEntry {
+	repository: string;
+	template?: string | null;
+	template_options?: Record<string, unknown>;
+	paths?: string[] | null;
+	excludes?: string[] | null;
+	retention?: Record<string, number | null | undefined> | null;
+}
 
 export interface JobDraft {
 	name: string;
@@ -21,46 +37,16 @@ export interface JobDraft {
 	retention?: Record<string, number>;
 }
 
-/** Produce the YAML lines for a single job entry, indented for nesting
- *  under `jobs:` (2 spaces for the key, 4 for nested fields). */
-function jobYaml(draft: JobDraft): string[] {
-	const out: string[] = [`  ${draft.name}:`];
-	if (draft.template) out.push(`    template: ${draft.template}`);
-	out.push(`    repository: ${draft.repository}`);
-
-	if (draft.template_options && Object.keys(draft.template_options).length > 0) {
-		out.push(`    template_options:`);
-		for (const [k, v] of Object.entries(draft.template_options)) {
-			if (v == null || v === '') continue;
-			out.push(`      ${k}: ${formatScalar(v)}`);
-		}
-	}
-
-	if (draft.paths && draft.paths.length > 0) {
-		out.push(`    paths:`);
-		for (const p of draft.paths) out.push(`      - ${formatScalar(p)}`);
-	}
-
-	if (draft.excludes && draft.excludes.length > 0) {
-		out.push(`    excludes:`);
-		for (const e of draft.excludes) out.push(`      - ${formatScalar(e)}`);
-	}
-
-	if (draft.retention && Object.keys(draft.retention).length > 0) {
-		out.push(`    retention:`);
-		for (const [k, v] of Object.entries(draft.retention)) {
-			if (v == null) continue;
-			out.push(`      ${k}: ${v}`);
-		}
-	}
-
-	return out;
+export interface RepositoryDraft {
+	name: string;
+	path: string;
+	password_file: string;
 }
 
-/** Quote a YAML scalar when needed — paths with Windows backslashes,
- *  glob patterns with `*`, anything starting with a special char.
- *  Bare alphanumerics stay unquoted. */
-function formatScalar(v: unknown): string {
+/** Quote a YAML scalar when needed — Windows paths with backslashes,
+ *  glob patterns, anything starting with a special character. Bare
+ *  alphanumerics, dots and dashes stay unquoted. */
+function scalar(v: unknown): string {
 	const s = String(v);
 	if (s === '') return '""';
 	const needsQuote =
@@ -69,19 +55,190 @@ function formatScalar(v: unknown): string {
 		s.endsWith(' ') ||
 		/^[-?]/.test(s);
 	if (!needsQuote) return s;
-	// Use double quotes; escape backslashes and double quotes.
 	return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
-/** Append a new job entry to the current YAML text. The existing
- *  content is preserved verbatim; the new block is canonical. */
-export function appendJobToYaml(currentYaml: string, draft: JobDraft): string {
-	const block = jobYaml(draft).join('\n');
-	const base = currentYaml.replace(/\s+$/, '');
-	const hasJobsKey = /^jobs\s*:\s*$/m.test(base) || /^jobs\s*:/m.test(base);
-
-	if (!hasJobsKey) {
-		return `${base}\n\njobs:\n${block}\n`;
-	}
-	return `${base}\n${block}\n`;
+function emitAgent(agent: ParsedConfig['agent']): string {
+	return [
+		`agent:`,
+		`  data_dir: ${scalar(agent.data_dir)}`,
+		`  log_level: ${scalar(agent.log_level)}`
+	].join('\n');
 }
+
+function emitRepositories(repos: Record<string, RepositoryEntry>): string {
+	if (Object.keys(repos).length === 0) return 'repositories: {}';
+	const out: string[] = ['repositories:'];
+	for (const [name, entry] of Object.entries(repos)) {
+		out.push(`  ${scalar(name)}:`);
+		out.push(`    path: ${scalar(entry.path)}`);
+		out.push(`    password_file: ${scalar(entry.password_file)}`);
+	}
+	return out.join('\n');
+}
+
+/** Same shape as `serve::runs::JobRun`'s YAML serialization but
+ *  pretty-printed. Used by both the template wizard and the
+ *  edit-job/delete-job flows. */
+function emitJob(name: string, job: JobEntry | JobDraft): string {
+	const lines: string[] = [`  ${scalar(name)}:`];
+
+	if (job.template) lines.push(`    template: ${scalar(job.template)}`);
+	lines.push(`    repository: ${scalar(job.repository)}`);
+
+	if (job.template_options && Object.keys(job.template_options).length > 0) {
+		lines.push(`    template_options:`);
+		for (const [k, v] of Object.entries(job.template_options)) {
+			if (v == null || v === '') continue;
+			lines.push(`      ${k}: ${scalar(v)}`);
+		}
+	}
+
+	if (job.paths && job.paths.length > 0) {
+		lines.push(`    paths:`);
+		for (const p of job.paths) lines.push(`      - ${scalar(p)}`);
+	}
+
+	if (job.excludes && job.excludes.length > 0) {
+		lines.push(`    excludes:`);
+		for (const e of job.excludes) lines.push(`      - ${scalar(e)}`);
+	}
+
+	if (job.retention && Object.keys(job.retention).length > 0) {
+		const used = Object.entries(job.retention).filter(([, v]) => v != null);
+		if (used.length > 0) {
+			lines.push(`    retention:`);
+			for (const [k, v] of used) lines.push(`      ${k}: ${v}`);
+		}
+	}
+
+	return lines.join('\n');
+}
+
+function emitJobs(jobs: Record<string, JobEntry>): string {
+	if (Object.keys(jobs).length === 0) return 'jobs: {}';
+	const out: string[] = ['jobs:'];
+	for (const [name, job] of Object.entries(jobs)) {
+		out.push(emitJob(name, job));
+	}
+	return out.join('\n');
+}
+
+/** Re-emit the full kovre.yaml from a parsed structure. Canonical
+ *  ordering: `agent` → `repositories` → `jobs`. Within each section
+ *  entries appear in insertion order (the caller controls that). */
+export function emitConfigYaml(parsed: ParsedConfig): string {
+	return [emitAgent(parsed.agent), '', emitRepositories(parsed.repositories), '', emitJobs(parsed.jobs)].join('\n') + '\n';
+}
+
+// ---- Mutation helpers ------------------------------------------------
+//
+// Each returns a fresh ParsedConfig — never mutates the input. Plug
+// the result into emitConfigYaml + PUT /api/config.
+
+export function addJob(parsed: ParsedConfig, draft: JobDraft): ParsedConfig {
+	const next: ParsedConfig = {
+		agent: parsed.agent,
+		repositories: { ...parsed.repositories },
+		jobs: { ...parsed.jobs, [draft.name]: draftToEntry(draft) }
+	};
+	return next;
+}
+
+export function updateJob(parsed: ParsedConfig, name: string, draft: JobDraft): ParsedConfig {
+	const jobs = { ...parsed.jobs };
+	// Preserve the existing insertion order: rebuild the map, replacing
+	// the entry in place. Object spread alone would push renamed keys to
+	// the end, which would visibly re-shuffle the YAML.
+	const ordered: Record<string, JobEntry> = {};
+	for (const k of Object.keys(parsed.jobs)) {
+		if (k === name) {
+			ordered[draft.name] = draftToEntry(draft);
+		} else {
+			ordered[k] = jobs[k];
+		}
+	}
+	// If the rename moved an entry away from where the old key sat,
+	// the new key may also need to land. Cover the case where the new
+	// name didn't already exist anywhere.
+	if (!Object.prototype.hasOwnProperty.call(ordered, draft.name)) {
+		ordered[draft.name] = draftToEntry(draft);
+	}
+	return { agent: parsed.agent, repositories: { ...parsed.repositories }, jobs: ordered };
+}
+
+export function removeJob(parsed: ParsedConfig, name: string): ParsedConfig {
+	const jobs = { ...parsed.jobs };
+	delete jobs[name];
+	return { agent: parsed.agent, repositories: { ...parsed.repositories }, jobs };
+}
+
+export function addRepository(parsed: ParsedConfig, draft: RepositoryDraft): ParsedConfig {
+	return {
+		agent: parsed.agent,
+		repositories: {
+			...parsed.repositories,
+			[draft.name]: { path: draft.path, password_file: draft.password_file }
+		},
+		jobs: { ...parsed.jobs }
+	};
+}
+
+export function updateRepository(
+	parsed: ParsedConfig,
+	name: string,
+	draft: RepositoryDraft
+): ParsedConfig {
+	const ordered: Record<string, RepositoryEntry> = {};
+	for (const k of Object.keys(parsed.repositories)) {
+		if (k === name) {
+			ordered[draft.name] = { path: draft.path, password_file: draft.password_file };
+		} else {
+			ordered[k] = parsed.repositories[k];
+		}
+	}
+	if (!Object.prototype.hasOwnProperty.call(ordered, draft.name)) {
+		ordered[draft.name] = { path: draft.path, password_file: draft.password_file };
+	}
+
+	// Repository renames also have to update any job that referenced the
+	// old name — otherwise the PUT will be rejected as
+	// `UnknownRepository`. We rewrite jobs to point at the new name.
+	const jobs: Record<string, JobEntry> = {};
+	for (const [k, job] of Object.entries(parsed.jobs)) {
+		jobs[k] = {
+			...job,
+			repository: job.repository === name ? draft.name : job.repository
+		};
+	}
+	return { agent: parsed.agent, repositories: ordered, jobs };
+}
+
+export function removeRepository(parsed: ParsedConfig, name: string): ParsedConfig {
+	const repositories = { ...parsed.repositories };
+	delete repositories[name];
+	return { agent: parsed.agent, repositories, jobs: { ...parsed.jobs } };
+}
+
+/** Jobs that currently reference a given repository — used to refuse
+ *  a delete that would leave dangling references. */
+export function jobsUsingRepository(parsed: ParsedConfig, repo: string): string[] {
+	return Object.entries(parsed.jobs)
+		.filter(([, job]) => job.repository === repo)
+		.map(([name]) => name);
+}
+
+function draftToEntry(draft: JobDraft): JobEntry {
+	const out: JobEntry = { repository: draft.repository };
+	if (draft.template) out.template = draft.template;
+	if (draft.template_options && Object.keys(draft.template_options).length > 0) {
+		out.template_options = draft.template_options;
+	}
+	if (draft.paths && draft.paths.length > 0) out.paths = draft.paths;
+	if (draft.excludes && draft.excludes.length > 0) out.excludes = draft.excludes;
+	if (draft.retention && Object.keys(draft.retention).length > 0) {
+		out.retention = draft.retention as Record<string, number>;
+	}
+	return out;
+}
+

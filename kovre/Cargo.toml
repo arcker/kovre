@@ -11,6 +11,7 @@ anyhow = "1.0.102"
 arc-swap = "1.7.1"
 atomicwrites = "0.4.4"
 clap = { version = "4", features = ["derive"] }
+getrandom = "0.2.16"
 jiff = "0.2.24"
 kovre-core = { path = "../kovre-core" }
 lithair-core = { version = "0.6.0", features = ["admin-ui"] }

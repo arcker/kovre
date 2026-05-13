@@ -9,19 +9,28 @@
 		type ConfigPayload,
 		type Template
 	} from '$lib/api';
-	import { addJob, emitConfigYaml, type JobDraft } from '$lib/yaml';
+	import {
+		emitConfigYaml,
+		updateJob,
+		type JobDraft,
+		type JobEntry
+	} from '$lib/yaml';
 	import DirInput from '$lib/DirInput.svelte';
 
-	const templateName = $derived(page.params.name);
+	const jobName = $derived(page.params.name);
 
 	let template = $state<Template | null>(null);
+	let templates = $state<Template[]>([]);
 	let config = $state<ConfigPayload | null>(null);
+	let originalJob = $state<JobEntry | null>(null);
 	let loading = $state(true);
 	let loadError = $state<string | null>(null);
 
-	let jobName = $state('');
+	let jobNameField = $state('');
 	let repository = $state('');
 	let optionValues = $state<Record<string, unknown>>({});
+	let customPaths = $state<string[]>(['']);
+	let customExcludes = $state<string[]>(['']);
 	let retention = $state<Record<string, number | ''>>({
 		keep_last: '',
 		keep_daily: '',
@@ -29,30 +38,43 @@
 		keep_monthly: ''
 	});
 
-	let submitting = $state(false);
-	let submitMessage = $state<string | null>(null);
+	let busy = $state(false);
 	let submitError = $state<string | null>(null);
 
 	onMount(async () => {
 		try {
 			const [tmpls, cfg] = await Promise.all([listTemplates(), getConfig()]);
-			template = tmpls.find((t) => t.name === templateName) ?? null;
+			templates = tmpls;
 			config = cfg;
-			// Default the new job's name to the template name + auto-suffix
-			// if a job with that name already exists.
-			const existing = new Set(Object.keys(cfg.parsed.jobs ?? {}));
-			let candidate = templateName;
-			let i = 2;
-			while (existing.has(candidate)) {
-				candidate = `${templateName}-${i++}`;
+			const existing = cfg.parsed.jobs[jobName] as JobEntry | undefined;
+			if (!existing) {
+				loadError = `No job named "${jobName}" in kovre.yaml`;
+				return;
 			}
-			jobName = candidate;
-			// Default to the first repository declared.
-			repository = Object.keys(cfg.parsed.repositories ?? {})[0] ?? '';
-			// Initialize option values.
-			for (const opt of template?.options ?? []) {
-				optionValues[opt.key] =
-					opt.type === 'directory_list' || opt.type === 'string_list' ? [''] : '';
+			originalJob = existing;
+			jobNameField = jobName;
+			repository = existing.repository;
+
+			if (existing.template) {
+				template = tmpls.find((t) => t.name === existing.template) ?? null;
+				const opts = (existing.template_options ?? {}) as Record<string, unknown>;
+				for (const o of template?.options ?? []) {
+					optionValues[o.key] =
+						o.type === 'directory_list' || o.type === 'string_list'
+							? Array.isArray(opts[o.key]) ? (opts[o.key] as string[]).slice() : ['']
+							: (opts[o.key] ?? '');
+				}
+			} else {
+				// Custom job — use the special "custom" pseudo-template.
+				template = tmpls.find((t) => t.name === 'custom') ?? null;
+				customPaths = existing.paths && existing.paths.length > 0 ? existing.paths.slice() : [''];
+				customExcludes = existing.excludes && existing.excludes.length > 0 ? existing.excludes.slice() : [''];
+			}
+
+			const ret = existing.retention ?? {};
+			for (const k of Object.keys(retention)) {
+				const v = (ret as Record<string, number | null | undefined>)[k];
+				retention[k] = v == null ? '' : v;
 			}
 		} catch (e) {
 			loadError = e instanceof Error ? e.message : String(e);
@@ -61,37 +83,35 @@
 		}
 	});
 
-	function addRow(key: string) {
-		const cur = (optionValues[key] as string[]) ?? [];
-		optionValues[key] = [...cur, ''];
+	function addRow(target: 'paths' | 'excludes') {
+		if (target === 'paths') customPaths = [...customPaths, ''];
+		else customExcludes = [...customExcludes, ''];
 	}
-	function removeRow(key: string, idx: number) {
-		const cur = ((optionValues[key] as string[]) ?? []).slice();
-		cur.splice(idx, 1);
-		optionValues[key] = cur.length > 0 ? cur : [''];
+	function removeRow(target: 'paths' | 'excludes', idx: number) {
+		const arr = (target === 'paths' ? customPaths : customExcludes).slice();
+		arr.splice(idx, 1);
+		const next = arr.length > 0 ? arr : [''];
+		if (target === 'paths') customPaths = next;
+		else customExcludes = next;
 	}
-	function updateRow(key: string, idx: number, value: string) {
-		const cur = ((optionValues[key] as string[]) ?? []).slice();
-		cur[idx] = value;
-		optionValues[key] = cur;
+	function updateRow(target: 'paths' | 'excludes', idx: number, value: string) {
+		const arr = (target === 'paths' ? customPaths : customExcludes).slice();
+		arr[idx] = value;
+		if (target === 'paths') customPaths = arr;
+		else customExcludes = arr;
 	}
 
 	function buildDraft(): JobDraft {
 		const draft: JobDraft = {
-			name: jobName.trim(),
-			repository: repository.trim(),
+			name: jobNameField.trim(),
+			repository: repository.trim()
 		};
 
-		if (template?.name === 'custom') {
-			const paths = ((optionValues.paths as string[]) ?? [])
-				.map((s) => s.trim())
-				.filter((s) => s.length > 0);
+		if (template?.name === 'custom' || (!originalJob?.template && template == null)) {
+			const paths = customPaths.map((s) => s.trim()).filter((s) => s.length > 0);
 			draft.paths = paths;
-
-			const excludes = ((optionValues.excludes as string[]) ?? [])
-				.map((s) => s.trim())
-				.filter((s) => s.length > 0);
-			if (excludes.length > 0) draft.excludes = excludes;
+			const excl = customExcludes.map((s) => s.trim()).filter((s) => s.length > 0);
+			if (excl.length > 0) draft.excludes = excl;
 		} else {
 			draft.template = template?.name ?? null;
 			const opts: Record<string, unknown> = {};
@@ -116,43 +136,40 @@
 
 	async function submit() {
 		if (!config) return;
-		submitting = true;
-		submitMessage = null;
+		busy = true;
 		submitError = null;
 		try {
 			const draft = buildDraft();
 			if (!draft.name) throw new Error('job name is required');
 			if (!draft.repository) throw new Error('repository is required');
-			if (config.parsed.jobs && draft.name in config.parsed.jobs) {
+			if (draft.name !== jobName && draft.name in config.parsed.jobs) {
 				throw new Error(`a job named "${draft.name}" already exists`);
 			}
-			const yaml = emitConfigYaml(addJob(config.parsed, draft));
+			const yaml = emitConfigYaml(updateJob(config.parsed, jobName, draft));
 			await putConfig(yaml);
-			submitMessage = `Saved. New job "${draft.name}" added.`;
-			// Navigate back to overview after a beat so the user sees feedback.
-			setTimeout(() => goto('/'), 400);
+			goto(`/jobs/${encodeURIComponent(draft.name)}`);
 		} catch (e) {
 			submitError = e instanceof Error ? e.message : String(e);
 		} finally {
-			submitting = false;
+			busy = false;
 		}
 	}
 </script>
 
-<a class="back" href="/templates">← templates</a>
+<a class="back" href={`/jobs/${jobName}`}>← back to {jobName}</a>
 
 {#if loading}
 	<p>Loading…</p>
 {:else if loadError}
-	<p class="error">Error: {loadError}</p>
-{:else if !template}
-	<p class="error">Unknown template "{templateName}".</p>
+	<p class="error">{loadError}</p>
+{:else if !originalJob}
+	<p class="error">Job not found.</p>
 {:else}
-	<h2>
-		<span class="icon">{template.icon}</span>
-		new {template.name} job
-	</h2>
-	<p class="lead">{template.description}</p>
+	<h2>Edit job: {jobName}</h2>
+	<p class="lead">
+		Template: <code>{originalJob.template ?? 'custom'}</code>. Renaming the job will
+		drop its run history (the events are keyed by the old name).
+	</p>
 
 	<form
 		onsubmit={(e) => {
@@ -162,10 +179,7 @@
 	>
 		<label>
 			<span class="label">Job name</span>
-			<input type="text" bind:value={jobName} required />
-			<span class="hint">
-				A short identifier — what you'll click on in the overview.
-			</span>
+			<input type="text" bind:value={jobNameField} required />
 		</label>
 
 		<label>
@@ -175,60 +189,67 @@
 					<option value={r}>{r}</option>
 				{/each}
 			</select>
-			<span class="hint">
-				One of the repositories declared in <code>repositories:</code>.
-			</span>
 		</label>
 
-		{#each template.options as opt (opt.key)}
+		{#if template?.name === 'custom' || (!originalJob.template)}
 			<fieldset>
-				<legend>{opt.label}{opt.required ? ' *' : ''}</legend>
-
-				{#if opt.type === 'directory'}
-					<DirInput bind:value={optionValues[opt.key] as string} placeholder="C:\..." />
-
-				{:else if opt.type === 'directory_list'}
-					{#each (optionValues[opt.key] as string[]) as _, idx ((opt.key, idx))}
-						<div class="row">
-							<DirInput
-								value={(optionValues[opt.key] as string[])[idx]}
-								onchange={(v) => updateRow(opt.key, idx, v)}
-								placeholder="C:\..."
-							/>
-							<button type="button" class="row-remove" onclick={() => removeRow(opt.key, idx)}>
-								remove
-							</button>
-						</div>
-					{/each}
-					<button type="button" class="row-add" onclick={() => addRow(opt.key)}>
-						+ add folder
-					</button>
-
-				{:else if opt.type === 'string_list'}
-					{#each (optionValues[opt.key] as string[]) as _, idx ((opt.key, idx))}
-						<div class="row">
-							<input
-								type="text"
-								value={(optionValues[opt.key] as string[])[idx]}
-								oninput={(e) => updateRow(opt.key, idx, (e.target as HTMLInputElement).value)}
-								placeholder="**/*.tmp"
-							/>
-							<button type="button" class="row-remove" onclick={() => removeRow(opt.key, idx)}>
-								remove
-							</button>
-						</div>
-					{/each}
-					<button type="button" class="row-add" onclick={() => addRow(opt.key)}>
-						+ add pattern
-					</button>
-				{/if}
+				<legend>Paths *</legend>
+				{#each customPaths as _, idx (idx)}
+					<div class="row">
+						<DirInput
+							value={customPaths[idx]}
+							onchange={(v) => updateRow('paths', idx, v)}
+							placeholder="C:\..."
+						/>
+						<button type="button" class="row-remove" onclick={() => removeRow('paths', idx)}>
+							remove
+						</button>
+					</div>
+				{/each}
+				<button type="button" class="row-add" onclick={() => addRow('paths')}>
+					+ add folder
+				</button>
 			</fieldset>
-		{/each}
+
+			<fieldset>
+				<legend>Exclude patterns (glob)</legend>
+				{#each customExcludes as _, idx (idx)}
+					<div class="row">
+						<input
+							type="text"
+							value={customExcludes[idx]}
+							oninput={(e) =>
+								updateRow('excludes', idx, (e.target as HTMLInputElement).value)}
+							placeholder="**/*.tmp"
+						/>
+						<button
+							type="button"
+							class="row-remove"
+							onclick={() => removeRow('excludes', idx)}
+						>
+							remove
+						</button>
+					</div>
+				{/each}
+				<button type="button" class="row-add" onclick={() => addRow('excludes')}>
+					+ add pattern
+				</button>
+			</fieldset>
+		{:else if template}
+			{#each template.options as opt (opt.key)}
+				<fieldset>
+					<legend>{opt.label}{opt.required ? ' *' : ''}</legend>
+					{#if opt.type === 'directory'}
+						<DirInput bind:value={optionValues[opt.key] as string} placeholder="C:\..." />
+					{/if}
+				</fieldset>
+			{/each}
+		{/if}
 
 		<fieldset>
-			<legend>Retention (optional)</legend>
+			<legend>Retention</legend>
 			<div class="retention">
-				{#each ['keep_last', 'keep_daily', 'keep_weekly', 'keep_monthly'] as k}
+				{#each ['keep_last', 'keep_daily', 'keep_weekly', 'keep_monthly'] as k (k)}
 					<label class="retention-row">
 						<span class="retention-label">{k.replace('keep_', 'keep last/by ')}</span>
 						<input
@@ -242,18 +263,15 @@
 			</div>
 		</fieldset>
 
-		{#if submitMessage}
-			<p class="success">{submitMessage}</p>
-		{/if}
 		{#if submitError}
 			<p class="error">{submitError}</p>
 		{/if}
 
 		<div class="actions">
-			<button type="submit" class="submit" disabled={submitting}>
-				{submitting ? 'saving…' : 'Save job'}
+			<button type="submit" class="submit" disabled={busy}>
+				{busy ? 'saving…' : 'Save changes'}
 			</button>
-			<a href="/templates" class="cancel">cancel</a>
+			<a href={`/jobs/${jobName}`} class="cancel">cancel</a>
 		</div>
 	</form>
 {/if}
@@ -269,20 +287,19 @@
 	.back:hover {
 		color: #e6e8eb;
 	}
-
 	h2 {
 		margin: 0 0 0.5rem;
 		font-size: 1.25rem;
 		font-weight: 500;
 		color: #e6e8eb;
 	}
-	.icon {
-		font-size: 1.5rem;
-		margin-right: 0.4rem;
-	}
 	.lead {
 		color: #9aa3b2;
-		margin: 0 0 1.5rem;
+		margin: 0 0 1.25rem;
+	}
+	.lead code {
+		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
+		color: #c5cad3;
 	}
 
 	form {
@@ -291,7 +308,6 @@
 		gap: 1rem;
 		max-width: 600px;
 	}
-
 	label {
 		display: flex;
 		flex-direction: column;
@@ -301,14 +317,6 @@
 		color: #c5cad3;
 		font-size: 0.9rem;
 		font-weight: 500;
-	}
-	.hint {
-		color: #6a7180;
-		font-size: 0.8rem;
-	}
-	.hint code {
-		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
-		color: #9aa3b2;
 	}
 
 	input[type='text'],
@@ -342,7 +350,6 @@
 
 	.row {
 		display: flex;
-		align-items: stretch;
 		gap: 0.5rem;
 		margin-bottom: 0.5rem;
 	}
@@ -390,8 +397,8 @@
 
 	.actions {
 		display: flex;
-		align-items: center;
 		gap: 0.75rem;
+		align-items: center;
 	}
 	.submit {
 		padding: 0.55rem 1.2rem;
@@ -418,10 +425,6 @@
 	}
 	.cancel:hover {
 		color: #e6e8eb;
-	}
-
-	.success {
-		color: #6ad08e;
 	}
 	.error {
 		color: #f47373;

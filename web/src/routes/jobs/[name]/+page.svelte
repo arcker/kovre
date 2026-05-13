@@ -1,15 +1,19 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
 	import {
+		getConfig,
 		listJobs,
 		listJobRuns,
 		listSnapshots,
+		putConfig,
 		triggerRun,
 		type Job,
 		type JobRun,
 		type Snapshot
 	} from '$lib/api';
+	import { emitConfigYaml, removeJob } from '$lib/yaml';
 	import { formatBytes, formatTime, shortId } from '$lib/format';
 
 	const jobName = $derived(page.params.name);
@@ -76,13 +80,29 @@
 	}
 
 	const isRunning = $derived(runs.some((r) => r.status === 'running'));
+
+	async function onDelete() {
+		if (!confirm(`Delete job "${jobName}"? The rustic snapshots are kept; only the kovre.yaml entry is removed.`)) return;
+		try {
+			const cfg = await getConfig();
+			const yaml = emitConfigYaml(removeJob(cfg.parsed, jobName));
+			await putConfig(yaml);
+			goto('/');
+		} catch (e) {
+			triggerMessage = e instanceof Error ? e.message : String(e);
+		}
+	}
 </script>
 
 <div class="header">
 	<h2>job: {jobName}</h2>
-	<button type="button" class="run-btn" disabled={triggering || isRunning} onclick={onRun}>
-		{isRunning ? 'running…' : triggering ? 'starting…' : 'Run now'}
-	</button>
+	<div class="header-actions">
+		<a class="action" href={`/jobs/${jobName}/edit`}>edit</a>
+		<button type="button" class="action delete" onclick={onDelete}>delete</button>
+		<button type="button" class="run-btn" disabled={triggering || isRunning} onclick={onRun}>
+			{isRunning ? 'running…' : triggering ? 'starting…' : 'Run now'}
+		</button>
+	</div>
 </div>
 
 {#if triggerMessage}
@@ -208,6 +228,37 @@
 		font-size: 0.95rem;
 		font-weight: 500;
 		color: #9aa3b2;
+	}
+
+	.header-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.action {
+		padding: 0.4rem 0.8rem;
+		background: #1f242c;
+		border: 1px solid #2a2f38;
+		border-radius: 4px;
+		color: #9aa3b2;
+		font: inherit;
+		font-size: 0.9rem;
+		text-decoration: none;
+		cursor: pointer;
+	}
+	.action:hover {
+		background: #262c36;
+		color: #e6e8eb;
+	}
+	.action.delete {
+		color: #d97070;
+		border-color: #3a2a2a;
+		background: #2a1f1f;
+	}
+	.action.delete:hover {
+		background: #3a1f1f;
+		color: #ff8a8a;
 	}
 
 	.run-btn {

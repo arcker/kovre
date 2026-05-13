@@ -1,12 +1,15 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import {
+		getConfig,
 		listJobs,
 		listJobRuns,
+		putConfig,
 		triggerRun,
 		type Job,
 		type JobRun
 	} from '$lib/api';
+	import { emitConfigYaml, removeJob } from '$lib/yaml';
 	import { formatBytes, formatRelative } from '$lib/format';
 
 	interface TileState {
@@ -75,6 +78,18 @@
 			await refresh();
 			const tile = tiles.find((t) => t.job.name === name);
 			if (!tile || tile.lastRun?.status !== 'running') return;
+		}
+	}
+
+	async function deleteJob(name: string) {
+		if (!confirm(`Delete job "${name}"? The rustic snapshots are kept; only the kovre.yaml entry is removed.`)) return;
+		try {
+			const cfg = await getConfig();
+			const yaml = emitConfigYaml(removeJob(cfg.parsed, name));
+			await putConfig(yaml);
+			await refresh();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
 		}
 	}
 
@@ -196,6 +211,15 @@
 						onclick={() => runJob(tile.job.name)}
 					>
 						{tile.busy || run?.status === 'running' ? '⟳ running' : '▶ Run now'}
+					</button>
+					<a class="action" href="/jobs/{tile.job.name}/edit">edit</a>
+					<button
+						type="button"
+						class="action delete"
+						onclick={() => deleteJob(tile.job.name)}
+						disabled={tile.busy || run?.status === 'running'}
+					>
+						delete
 					</button>
 					<a class="open" href="/jobs/{tile.job.name}">details →</a>
 				</footer>
@@ -369,6 +393,33 @@
 	.run:disabled {
 		background: #2a2f38;
 		color: #6a7180;
+		cursor: not-allowed;
+	}
+
+	.action {
+		padding: 0.4rem 0.7rem;
+		background: #1f242c;
+		border: 1px solid #2a2f38;
+		border-radius: 4px;
+		color: #9aa3b2;
+		font: inherit;
+		font-size: 0.85rem;
+		text-decoration: none;
+		cursor: pointer;
+	}
+	.action:hover:not(:disabled) {
+		background: #262c36;
+		color: #e6e8eb;
+	}
+	.action.delete {
+		color: #d97070;
+	}
+	.action.delete:hover:not(:disabled) {
+		background: #2a1f1f;
+		color: #ff8a8a;
+	}
+	.action:disabled {
+		opacity: 0.5;
 		cursor: not-allowed;
 	}
 

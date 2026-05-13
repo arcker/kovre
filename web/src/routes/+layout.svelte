@@ -31,6 +31,7 @@
 		<a href="/">overview</a>
 		<a href="/runs">runs</a>
 		<a href="/templates">+ add job</a>
+		<a href="/repositories">repositories</a>
 		<a href="/about">about</a>
 	</nav>
 	<div class="actions">

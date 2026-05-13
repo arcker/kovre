@@ -110,6 +110,76 @@ export const listTemplates = (): Promise<Template[]> => getJson<Template[]>('/ap
 export const listFs = (path: string): Promise<FsListing> =>
 	getJson<FsListing>(`/api/fs?path=${encodeURIComponent(path)}`);
 
+export interface FsStat {
+	exists: boolean;
+	is_file: boolean;
+	is_dir: boolean;
+	size?: number;
+	path: string;
+}
+
+export const fsStat = (path: string): Promise<FsStat> =>
+	getJson<FsStat>(`/api/fs/stat?path=${encodeURIComponent(path)}`);
+
+/** Generate a fresh random passphrase server-side and write it to
+ *  `path`. The passphrase itself never leaves the box — the response
+ *  only confirms the length and target path. */
+export async function initRepositoryPassword(path: string): Promise<{ path: string; length: number }> {
+	const resp = await fetch('/api/repositories/init-password', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ path })
+	});
+	const body = await resp.json().catch(() => ({}) as Record<string, unknown>);
+	if (resp.ok) {
+		return body as { path: string; length: number };
+	}
+	const hint = typeof body.hint === 'string' ? ` (${body.hint})` : '';
+	const reason = typeof body.reason === 'string' ? `: ${body.reason}` : '';
+	throw new Error(`${body.error ?? `HTTP ${resp.status}`}${hint}${reason}`);
+}
+
+export interface RepositoryStatus {
+	initialized: boolean;
+}
+
+/** Per-repo init state, keyed by repository name. Used by the
+ *  /repositories list to hide the "init" button on repos that
+ *  already have a rustic config file on disk. */
+export const getRepositoriesStatus = (): Promise<Record<string, RepositoryStatus>> =>
+	getJson<Record<string, RepositoryStatus>>('/api/repositories/status');
+
+/** Initialize the rustic repository on disk (creates the `config`,
+ *  `keys`, `data`, `index`, `snapshots` directories). Returns:
+ *    - { ok: true, justInitialized: true }   when the repo was created
+ *    - { ok: true, justInitialized: false }  when it was already initialized (409 → no-op)
+ *    - throws Error                          on any other failure
+ *  The caller can chain this after `putConfig` without branching on
+ *  the "already exists" case, which is the common path when editing
+ *  an existing repo. */
+export async function initRepository(
+	name: string
+): Promise<{ ok: true; justInitialized: boolean }> {
+	const resp = await fetch(
+		`/api/repositories/${encodeURIComponent(name)}/init`,
+		{ method: 'POST' }
+	);
+	const body = await resp.json().catch(() => ({}) as Record<string, unknown>);
+	if (resp.status === 200) {
+		return { ok: true, justInitialized: true };
+	}
+	if (resp.status === 409 && body.error === 'already_initialized') {
+		return { ok: true, justInitialized: false };
+	}
+	const message =
+		typeof body.message === 'string'
+			? body.message
+			: typeof body.error === 'string'
+				? body.error
+				: `HTTP ${resp.status}`;
+	throw new Error(message);
+}
+
 export const getConfig = (): Promise<ConfigPayload> => getJson<ConfigPayload>('/api/config');
 
 /** Replace the running config. Server validates the YAML before

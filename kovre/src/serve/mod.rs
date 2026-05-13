@@ -151,6 +151,52 @@ pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Re
             Ok(handle_list_fs(req))
         });
 
+        // GET /api/fs/stat?path=<p> — file/directory existence and type.
+        // Used by the repository wizard to warn (not block) when the
+        // password_file path points at something that does not exist.
+        server = server.with_route_async(Method::GET, "/api/fs/stat", |req| async move {
+            Ok(handle_fs_stat(req))
+        });
+
+        // POST /api/repositories/init-password { path } — generates a
+        // 32-byte random passphrase (hex-encoded), writes it atomically
+        // to `<path>`. Refuses to overwrite an existing file so the
+        // user never destroys a real passphrase by accident.
+        server = server.with_route_async(
+            Method::POST,
+            "/api/repositories/init-password",
+            |req| async move { Ok(handle_init_password(req).await) },
+        );
+
+        // POST /api/repositories/:name/init — materialize the rustic
+        // repository on disk (creates the `config` file + keys + empty
+        // index). Idempotent-style: returns 409 if the repo is already
+        // initialized so the wizard can call this unconditionally and
+        // surface "already initialized" without aborting.
+        let cfg_for_init: ConfigHandle = Arc::clone(&cfg_arc);
+        server = server.with_route_async(
+            Method::POST,
+            "/api/repositories/*/init",
+            move |req| {
+                let cfg = cfg_for_init.load_full();
+                async move { Ok(handle_init_repo(req, cfg).await) }
+            },
+        );
+
+        // GET /api/repositories/status — per-repo `{initialized: bool}`.
+        // Drives the conditional rendering of the "init" button on
+        // /repositories: a repo whose `<path>/config` exists on disk
+        // is hidden from the init affordance.
+        let cfg_for_status: ConfigHandle = Arc::clone(&cfg_arc);
+        server = server.with_route_async(
+            Method::GET,
+            "/api/repositories/status",
+            move |_req| {
+                let cfg = cfg_for_status.load_full();
+                async move { Ok(handle_repositories_status(&cfg)) }
+            },
+        );
+
         // POST /api/sync — refresh the Snapshot projection on demand.
         // The boot-time sync only runs once; this lets the dashboard
         // pull in snapshots created out-of-band (e.g. via the CLI) without
@@ -419,6 +465,233 @@ fn handle_list_templates() -> RouteResponse {
     response::json_value(StatusCode::OK, &list_templates_data())
 }
 
+/// `GET /api/repositories/status` — report whether each repository
+/// declared in `kovre.yaml` has been materialized on disk by rustic.
+/// "Initialized" means a `config` file exists at `<repo.path>/config`,
+/// which is the marker rustic itself uses to detect a live repo.
+fn handle_repositories_status(cfg: &Config) -> RouteResponse {
+    let mut map = serde_json::Map::new();
+    for (name, repo) in &cfg.repositories {
+        let config_file = repo.path.join("config");
+        map.insert(
+            name.clone(),
+            serde_json::json!({ "initialized": config_file.is_file() }),
+        );
+    }
+    response::json_value(StatusCode::OK, &serde_json::Value::Object(map))
+}
+
+/// `POST /api/repositories/:name/init` — run `kovre_core::backup::init_repo`
+/// against the named repository. The rustic write is synchronous and
+/// touches disk, so we wrap it in `spawn_blocking`.
+async fn handle_init_repo(req: RouteRequest, cfg: Arc<Config>) -> RouteResponse {
+    let path = req.uri().path().to_string();
+    let name = match extract_repo_name_for_init(&path) {
+        Some(n) => n,
+        None => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "could not parse repository name from path"}),
+            );
+        }
+    };
+
+    let repo = match cfg.repositories.get(&name) {
+        Some(r) => r.clone(),
+        None => {
+            return response::json_value(
+                StatusCode::NOT_FOUND,
+                &serde_json::json!({"error": "unknown_repository", "name": name}),
+            );
+        }
+    };
+
+    let result = tokio::task::spawn_blocking(move || kovre_core::backup::init_repo(&repo)).await;
+    match result {
+        Ok(Ok(())) => response::json_value(
+            StatusCode::OK,
+            &serde_json::json!({"initialized": name}),
+        ),
+        Ok(Err(e)) => {
+            let msg = format!("{e:#}");
+            // rustic refuses to re-init an existing repo. Surface that
+            // as a 409 so the wizard can show "already initialized"
+            // rather than a generic 500.
+            let lower = msg.to_lowercase();
+            let already = lower.contains("already") || lower.contains("config file already");
+            response::json_value(
+                if already { StatusCode::CONFLICT } else { StatusCode::BAD_REQUEST },
+                &serde_json::json!({
+                    "error": if already { "already_initialized" } else { "init_failed" },
+                    "name": name,
+                    "message": msg,
+                }),
+            )
+        }
+        Err(join_err) => response::json_value(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &serde_json::json!({"error": "init_task_panicked", "reason": join_err.to_string()}),
+        ),
+    }
+}
+
+/// Pull `<name>` out of `/api/repositories/<name>/init`.
+fn extract_repo_name_for_init(path: &str) -> Option<String> {
+    let stripped = path.strip_prefix("/api/repositories/")?;
+    let (name, rest) = stripped.split_once('/')?;
+    if rest != "init" || name.is_empty() {
+        return None;
+    }
+    Some(query::percent_decode(name))
+}
+
+/// `GET /api/fs/stat?path=<p>` — answer whether a path exists, and what
+/// kind of entry sits there. Wraps `list_fs_stat_data`.
+fn handle_fs_stat(req: RouteRequest) -> RouteResponse {
+    let (status, body) = list_fs_stat_data(req.uri().query().unwrap_or(""));
+    response::json_value(status, &body)
+}
+
+fn list_fs_stat_data(query: &str) -> (StatusCode, serde_json::Value) {
+    let raw_path = match query::param(query, "path") {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"error": "missing_path"}),
+            );
+        }
+    };
+    if raw_path.split(['/', '\\']).any(|seg| seg == "..") {
+        return (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"error": "path_traversal", "path": raw_path}),
+        );
+    }
+    let path = std::path::PathBuf::from(&raw_path);
+    match std::fs::metadata(&path) {
+        Ok(md) => (
+            StatusCode::OK,
+            serde_json::json!({
+                "exists": true,
+                "is_file": md.is_file(),
+                "is_dir": md.is_dir(),
+                "size": md.len(),
+                "path": raw_path,
+            }),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::OK,
+            serde_json::json!({
+                "exists": false,
+                "is_file": false,
+                "is_dir": false,
+                "path": raw_path,
+            }),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "io", "reason": e.to_string(), "path": raw_path}),
+        ),
+    }
+}
+
+/// `POST /api/repositories/init-password { path }` — write a fresh
+/// 32-byte (hex-encoded, 64 chars) random passphrase to the given
+/// path. Refuses to overwrite an existing file: silently destroying
+/// a real passphrase would orphan a rustic repository forever.
+async fn handle_init_password(req: RouteRequest) -> RouteResponse {
+    use lithair_core::app::request;
+
+    #[derive(serde::Deserialize)]
+    struct Body {
+        path: String,
+    }
+    let body: Body = match request::read_body_json(req).await {
+        Ok(b) => b,
+        Err(e) => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "read_body", "reason": e.to_string()}),
+            );
+        }
+    };
+
+    let (status, payload) = init_password_data(&body.path);
+    response::json_value(status, &payload)
+}
+
+fn init_password_data(raw_path: &str) -> (StatusCode, serde_json::Value) {
+    if raw_path.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"error": "missing_path"}),
+        );
+    }
+    if raw_path.split(['/', '\\']).any(|seg| seg == "..") {
+        return (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"error": "path_traversal", "path": raw_path}),
+        );
+    }
+
+    let path = std::path::PathBuf::from(raw_path);
+    if path.exists() {
+        return (
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "error": "file_exists",
+                "path": raw_path,
+                "hint": "refusing to overwrite; delete the file or pick a different path",
+            }),
+        );
+    }
+
+    let mut buf = [0u8; 32];
+    if let Err(e) = getrandom::getrandom(&mut buf) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "rand", "reason": e.to_string()}),
+        );
+    }
+    let mut hex = String::with_capacity(64);
+    for byte in buf {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+
+    // Ensure the parent directory exists. Lots of users will point at
+    // `C:\ProgramData\Kovre\nas.key` on a fresh box where the directory
+    // hasn't been created yet.
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({"error": "mkdir", "reason": e.to_string(), "path": raw_path}),
+                );
+            }
+        }
+    }
+
+    use atomicwrites::{AllowOverwrite, AtomicFile};
+    use std::io::Write;
+    let af = AtomicFile::new(&path, AllowOverwrite);
+    if let Err(e) = af.write(|f| f.write_all(hex.as_bytes())) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "io_write", "reason": e.to_string(), "path": raw_path}),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        serde_json::json!({
+            "path": raw_path,
+            "length": hex.len(),
+        }),
+    )
+}
+
 /// Pure data computation for `/api/templates`, split out so unit tests
 /// can assert on the JSON without going through hyper bodies.
 fn list_templates_data() -> serde_json::Value {
@@ -587,6 +860,27 @@ mod tests {
     }
 
     #[test]
+    fn extract_repo_name_for_init_handles_simple_name() {
+        assert_eq!(
+            extract_repo_name_for_init("/api/repositories/nas/init"),
+            Some("nas".into())
+        );
+    }
+
+    #[test]
+    fn extract_repo_name_for_init_handles_percent_encoded() {
+        assert_eq!(
+            extract_repo_name_for_init("/api/repositories/local%20drive/init"),
+            Some("local drive".into())
+        );
+    }
+
+    #[test]
+    fn extract_repo_name_for_init_rejects_wrong_suffix() {
+        assert!(extract_repo_name_for_init("/api/repositories/nas/list").is_none());
+    }
+
+    #[test]
     fn list_templates_data_returns_the_four_known_templates() {
         let arr = list_templates_data();
         let names: Vec<String> = arr
@@ -655,6 +949,77 @@ mod tests {
         let missing = tempdir.path().join("does-not-exist");
         let (status, _) = list_fs_data(&fs_query(missing.to_str().unwrap()));
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ---- /api/fs/stat ----
+
+    #[test]
+    fn fs_stat_reports_existing_file() {
+        let tempdir = tempfile::TempDir::new().unwrap();
+        let file = tempdir.path().join("hi.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let (status, body) = list_fs_stat_data(&fs_query(file.to_str().unwrap()));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["exists"], true);
+        assert_eq!(body["is_file"], true);
+        assert_eq!(body["is_dir"], false);
+        assert_eq!(body["size"], 5);
+    }
+
+    #[test]
+    fn fs_stat_reports_missing_file() {
+        let tempdir = tempfile::TempDir::new().unwrap();
+        let missing = tempdir.path().join("nope.key");
+        let (status, body) = list_fs_stat_data(&fs_query(missing.to_str().unwrap()));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["exists"], false);
+    }
+
+    #[test]
+    fn fs_stat_rejects_path_traversal() {
+        let (status, _) = list_fs_stat_data(&fs_query("C:\\Users\\..\\Windows"));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // ---- /api/repositories/init-password ----
+
+    #[test]
+    fn init_password_writes_64_hex_chars() {
+        let tempdir = tempfile::TempDir::new().unwrap();
+        let target = tempdir.path().join("test.key");
+        let (status, body) = init_password_data(target.to_str().unwrap());
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["length"], 64);
+        let on_disk = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(on_disk.len(), 64);
+        assert!(on_disk.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn init_password_refuses_to_overwrite() {
+        let tempdir = tempfile::TempDir::new().unwrap();
+        let target = tempdir.path().join("preexisting.key");
+        std::fs::write(&target, b"do not overwrite me").unwrap();
+        let (status, body) = init_password_data(target.to_str().unwrap());
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "file_exists");
+        // Existing content untouched.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "do not overwrite me");
+    }
+
+    #[test]
+    fn init_password_creates_missing_parent_dirs() {
+        let tempdir = tempfile::TempDir::new().unwrap();
+        let nested = tempdir.path().join("deep").join("nest").join("key.txt");
+        let (status, _) = init_password_data(nested.to_str().unwrap());
+        assert_eq!(status, StatusCode::OK);
+        assert!(nested.exists());
+    }
+
+    #[test]
+    fn init_password_rejects_path_traversal() {
+        let (status, _) = init_password_data("C:\\Users\\..\\Windows\\key.txt");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     // ---- PUT /api/config ----

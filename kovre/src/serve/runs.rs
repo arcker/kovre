@@ -222,12 +222,14 @@ mod tests {
     use tempfile::TempDir;
 
     fn fake_cfg_with_one_job() -> Config {
+        use kovre_core::config::BackendKind;
         let mut repositories = IndexMap::new();
         repositories.insert(
             "test".into(),
             Repository {
                 path: PathBuf::from(r"C:\nope"),
-                password_file: PathBuf::from(r"C:\nope.key"),
+                backend: BackendKind::Rustic,
+                password_file: Some(PathBuf::from(r"C:\nope.key")),
             },
         );
         let mut jobs = IndexMap::new();

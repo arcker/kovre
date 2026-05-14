@@ -217,7 +217,8 @@ fn retention_keep_last_forgets_older_snapshots() {
 
     let repo_cfg = RepoConfig {
         path: repo_path.clone(),
-        password_file: password_file.clone(),
+        backend: kovre_core::config::BackendKind::Rustic,
+        password_file: Some(password_file.clone()),
     };
 
     engine_for(&repo_cfg).init().unwrap();

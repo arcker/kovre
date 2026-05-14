@@ -124,7 +124,8 @@ mod tests {
 
         let repo_cfg = Repository {
             path: repo_path.clone(),
-            password_file: password_file.clone(),
+            backend: kovre_core::config::BackendKind::Rustic,
+            password_file: Some(password_file.clone()),
         };
 
         kbackup::engine_for(&repo_cfg).init().unwrap();

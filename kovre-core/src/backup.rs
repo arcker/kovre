@@ -23,7 +23,7 @@ use rustic_core::{
 };
 use tracing::{info, warn};
 
-use crate::config::{Repository as RepoConfig, Retention};
+use crate::config::{BackendKind, Repository as RepoConfig, Retention};
 
 /// Tag prefix kovre attaches to every rustic snapshot so we can later
 /// filter by job. Mirror snapshots don't carry this tag (the engine
@@ -95,11 +95,45 @@ pub trait BackupEngine: Send + Sync {
 /// Pick the right engine for a repository, based on its `backend:`
 /// declaration in `kovre.yaml`.
 ///
-/// Phase 4 step 1 only knows rustic — the schema extension that adds
-/// the `backend` field comes in step 2. For now every repository is
-/// served by `RusticEngine`.
+/// `BackendKind::Mirror` returns a placeholder that fails every
+/// operation with a clear "not implemented yet" message until step 3
+/// lands the real `MirrorEngine`. This way a config that declares
+/// `backend: mirror` parses cleanly today, but a user who tries to
+/// run a backup against it gets actionable feedback rather than
+/// silent fall-back to rustic.
 pub fn engine_for(repo: &RepoConfig) -> Box<dyn BackupEngine> {
-    Box::new(RusticEngine::new(repo.clone()))
+    match repo.backend {
+        BackendKind::Rustic => Box::new(RusticEngine::new(repo.clone())),
+        BackendKind::Mirror => Box::new(MirrorEnginePlaceholder),
+    }
+}
+
+/// Stand-in for the mirror engine while Phase 4 step 3 is in flight.
+/// Every method returns the same error so callers know which step
+/// to wait for.
+struct MirrorEnginePlaceholder;
+
+impl BackupEngine for MirrorEnginePlaceholder {
+    fn init(&self) -> Result<()> {
+        anyhow::bail!(
+            "the `mirror` backend lands in Phase 4 step 3 — keep `backend: rustic` for now"
+        )
+    }
+    fn backup(&self, _job_name: &str, _source: BackupSource) -> Result<SnapshotInfo> {
+        anyhow::bail!("mirror backend not implemented yet (Phase 4 step 3)")
+    }
+    fn list_snapshots(&self, _job_name: &str) -> Result<Vec<SnapshotInfo>> {
+        // Return empty — the dashboard's snapshot sync should never
+        // abort just because a mirror repo is configured.
+        Ok(Vec::new())
+    }
+    fn apply_retention(
+        &self,
+        _job_name: &str,
+        _retention: &Retention,
+    ) -> Result<RetentionOutcome> {
+        Ok(RetentionOutcome::default())
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -118,18 +152,19 @@ impl RusticEngine {
     }
 
     fn read_password(&self) -> Result<String> {
-        let raw = std::fs::read_to_string(&self.repo.password_file).with_context(|| {
-            format!(
-                "reading password file `{}`",
-                self.repo.password_file.display()
-            )
-        })?;
+        let password_file = self
+            .repo
+            .password_file
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!(
+                "rustic backend requires `password_file:` on the repository — set it in kovre.yaml \
+                 (or pick `backend: mirror` if you don't want a passphrase)"
+            ))?;
+        let raw = std::fs::read_to_string(password_file)
+            .with_context(|| format!("reading password file `{}`", password_file.display()))?;
         let pass = raw.lines().next().unwrap_or("").trim_end().to_string();
         if pass.is_empty() {
-            anyhow::bail!(
-                "password file `{}` is empty",
-                self.repo.password_file.display()
-            );
+            anyhow::bail!("password file `{}` is empty", password_file.display());
         }
         Ok(pass)
     }
@@ -360,6 +395,7 @@ mod tests {
             keep_weekly: Some(8),
             keep_monthly: Some(12),
             keep_yearly: Some(5),
+            keep_versions: None,
         };
         let k = build_keep_options(&r);
         assert_eq!(k.keep_last, Some(7));
@@ -400,8 +436,47 @@ mod tests {
         use std::path::PathBuf;
         let repo = RepoConfig {
             path: PathBuf::from(r"C:\nope"),
-            password_file: PathBuf::from(r"C:\nope.key"),
+            backend: BackendKind::Rustic,
+            password_file: Some(PathBuf::from(r"C:\nope.key")),
         };
         let _engine = engine_for(&repo); // boxed trait object; just check it constructs
+    }
+
+    #[test]
+    fn engine_for_returns_placeholder_for_mirror() {
+        use std::path::PathBuf;
+        let repo = RepoConfig {
+            path: PathBuf::from(r"C:\nope"),
+            backend: BackendKind::Mirror,
+            password_file: None,
+        };
+        let engine = engine_for(&repo);
+        // The placeholder errors on init/backup but not on the read
+        // methods — those return empty so the dashboard's snapshot
+        // sync doesn't blow up over a mirror repo before step 3.
+        assert!(engine.init().is_err());
+        assert!(engine.backup("any", BackupSource { paths: vec![], excludes: vec![] }).is_err());
+        assert!(engine.list_snapshots("any").unwrap().is_empty());
+        assert_eq!(
+            engine.apply_retention("any", &Retention::default()).unwrap().forgotten,
+            0
+        );
+    }
+
+    #[test]
+    fn rustic_engine_reports_missing_password_file() {
+        use std::path::PathBuf;
+        let repo = RepoConfig {
+            path: PathBuf::from(r"C:\nope"),
+            backend: BackendKind::Rustic,
+            password_file: None,
+        };
+        let engine = RusticEngine::new(repo);
+        let err = engine.init().unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("password_file"),
+            "expected hint about password_file in error message, got: {msg}"
+        );
     }
 }

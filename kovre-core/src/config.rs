@@ -23,6 +23,8 @@ pub enum ConfigError {
     JobMissingSource { job: String },
     #[error("job `{job}` cannot use both `template` and explicit `paths`/`excludes`")]
     JobTemplateAndPaths { job: String },
+    #[error("repository `{repository}` uses the `rustic` backend but has no `password_file`")]
+    RusticMissingPasswordFile { repository: String },
 }
 
 fn default_log_level() -> String {
@@ -37,11 +39,33 @@ pub struct Agent {
     pub log_level: String,
 }
 
+/// Storage format kovre uses for a repository. Phase 4 introduces the
+/// `Mirror` backend; `Rustic` stays the default for compat with all
+/// configs written before Phase 4 landed.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackendKind {
+    #[default]
+    Rustic,
+    Mirror,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Repository {
     pub path: PathBuf,
-    pub password_file: PathBuf,
+
+    /// Engine that drives reads/writes against `path`. Defaults to
+    /// `rustic` if omitted, which is what every Phase 1+2+3 config
+    /// did implicitly.
+    #[serde(default)]
+    pub backend: BackendKind,
+
+    /// Rustic-only: path to the passphrase file. Required for
+    /// `BackendKind::Rustic`, ignored (and typically absent) for
+    /// `BackendKind::Mirror`. Validation happens in `Config::validate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -59,6 +83,12 @@ pub struct Retention {
     pub keep_monthly: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_yearly: Option<u32>,
+
+    /// Mirror backend only: how many archived copies of a file are kept
+    /// in `.versions/<relpath>/`. Ignored by the rustic engine, which
+    /// reads the `keep_*` snapshot fields above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_versions: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -109,6 +139,18 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        for (name, repo) in &self.repositories {
+            if repo.backend == BackendKind::Rustic && repo.password_file.is_none() {
+                return Err(ConfigError::RusticMissingPasswordFile {
+                    repository: name.clone(),
+                });
+            }
+            // Mirror with an extra password_file is accepted on purpose
+            // — it doesn't hurt anything to keep the file lying around,
+            // and a user migrating a rustic repo to mirror might leave
+            // the field behind without realising.
+        }
+
         for (name, job) in &self.jobs {
             if !self.repositories.contains_key(&job.repository) {
                 return Err(ConfigError::UnknownRepository {
@@ -151,7 +193,10 @@ mod tests {
         assert_eq!(cfg.repositories.len(), 1);
         let nas = cfg.repositories.get("nas").unwrap();
         assert_eq!(nas.path, PathBuf::from(r"\\nas.local\backup\kovre"));
-        assert_eq!(nas.password_file, PathBuf::from(r"C:\ProgramData\Kovre\nas.key"));
+        assert_eq!(
+            nas.password_file,
+            Some(PathBuf::from(r"C:\ProgramData\Kovre\nas.key"))
+        );
 
         assert_eq!(cfg.jobs.len(), 4);
 
@@ -318,5 +363,79 @@ jobs:
 "#;
         let cfg = Config::from_str(yaml, &fake_path()).unwrap();
         assert!(cfg.jobs.get("docs").unwrap().retention.is_none());
+    }
+
+    #[test]
+    fn backend_defaults_to_rustic_when_omitted() {
+        let yaml = r#"
+agent:
+  data_dir: C:\ProgramData\Kovre
+repositories:
+  nas:
+    path: X:\backup
+    password_file: X:\backup.key
+jobs: {}
+"#;
+        let cfg = Config::from_str(yaml, &fake_path()).unwrap();
+        assert_eq!(cfg.repositories["nas"].backend, BackendKind::Rustic);
+        assert_eq!(
+            cfg.repositories["nas"].password_file,
+            Some(PathBuf::from(r"X:\backup.key"))
+        );
+    }
+
+    #[test]
+    fn mirror_backend_parses_without_password_file() {
+        let yaml = r#"
+agent:
+  data_dir: C:\ProgramData\Kovre
+repositories:
+  photos:
+    backend: mirror
+    path: X:\photos-versions
+jobs: {}
+"#;
+        let cfg = Config::from_str(yaml, &fake_path()).unwrap();
+        assert_eq!(cfg.repositories["photos"].backend, BackendKind::Mirror);
+        assert_eq!(cfg.repositories["photos"].password_file, None);
+    }
+
+    #[test]
+    fn rustic_without_password_file_is_rejected() {
+        let yaml = r#"
+agent:
+  data_dir: C:\ProgramData\Kovre
+repositories:
+  nas:
+    path: X:\backup
+jobs: {}
+"#;
+        let err = Config::from_str(yaml, &fake_path()).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::RusticMissingPasswordFile { ref repository } if repository == "nas"),
+            "expected RusticMissingPasswordFile, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn keep_versions_field_parses() {
+        let yaml = r#"
+agent:
+  data_dir: C:\ProgramData\Kovre
+repositories:
+  photos:
+    backend: mirror
+    path: X:\photos-versions
+jobs:
+  family:
+    repository: photos
+    paths:
+      - D:\Pictures
+    retention:
+      keep_versions: 10
+"#;
+        let cfg = Config::from_str(yaml, &fake_path()).unwrap();
+        let r = cfg.jobs.get("family").unwrap().retention.as_ref().unwrap();
+        assert_eq!(r.keep_versions, Some(10));
     }
 }

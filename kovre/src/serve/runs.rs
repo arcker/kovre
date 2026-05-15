@@ -178,9 +178,12 @@ pub async fn trigger_job_run(
     Ok(run_id)
 }
 
-/// Resolve template + run rustic backup, returning the snapshot info.
-/// Wraps the synchronous `kovre_core` API in `spawn_blocking` to avoid
-/// blocking the Tokio reactor.
+/// Resolve template + run backup + apply retention, returning the
+/// snapshot info. Wraps the synchronous `kovre_core` API in
+/// `spawn_blocking` to avoid blocking the Tokio reactor.
+///
+/// Retention is best-effort: a retention failure after a successful
+/// backup is logged at warn level but does not fail the run.
 async fn run_backup(
     job_name: &str,
     job: &Job,
@@ -201,8 +204,31 @@ async fn run_backup(
         excludes: resolved.excludes,
     };
     let job_name_owned = job_name.to_string();
-    tokio::task::spawn_blocking(move || {
-        backup::engine_for(&repo).backup(&job_name_owned, source)
+    let retention = job.retention.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<SnapshotInfo> {
+        let engine = backup::engine_for(&repo);
+        let snap = engine.backup(&job_name_owned, source)?;
+        if let Some(r) = &retention {
+            match engine.apply_retention(&job_name_owned, r) {
+                Ok(outcome) => {
+                    if outcome.forgotten > 0 || outcome.kept > 0 {
+                        info!(
+                            kept = outcome.kept,
+                            forgotten = outcome.forgotten,
+                            job = job_name_owned.as_str(),
+                            "retention applied"
+                        );
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        job = job_name_owned.as_str(),
+                        "retention failed: {err:#}"
+                    );
+                }
+            }
+        }
+        Ok(snap)
     })
     .await
     .map_err(|e| anyhow::anyhow!("backup task panicked: {e}"))?

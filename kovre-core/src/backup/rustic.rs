@@ -1,16 +1,5 @@
-//! Backup engine abstraction.
-//!
-//! Phase 4 introduces a `BackupEngine` trait so the runtime can pick
-//! between several persistence formats per repository. The previous
-//! top-level free functions (`init_repo`, `backup_job`, …) are now
-//! methods on a `RusticEngine` impl; a second `MirrorEngine` lands in
-//! step 3 of the phase. Callers obtain an engine via the
-//! [`engine_for`] factory, which inspects the repository's declared
-//! backend.
-//!
-//! All snapshots produced by `RusticEngine` are tagged
-//! `kovre-job:<job-name>` so a shared repository can host several
-//! jobs without their snapshot lists overlapping.
+//! `BackupEngine` impl backed by `rustic_core` — deduplicated,
+//! encrypted, restic-compatible storage.
 
 use std::path::PathBuf;
 
@@ -23,125 +12,10 @@ use rustic_core::{
 };
 use tracing::{info, warn};
 
-use crate::config::{BackendKind, Repository as RepoConfig, Retention};
+use crate::backup::{BackupEngine, BackupSource, RetentionOutcome, SnapshotInfo, JOB_TAG_PREFIX};
+use crate::config::{Repository as RepoConfig, Retention};
 
-/// Tag prefix kovre attaches to every rustic snapshot so we can later
-/// filter by job. Mirror snapshots don't carry this tag (the engine
-/// does not produce snapshots in the rustic sense).
-pub const JOB_TAG_PREFIX: &str = "kovre-job:";
-
-/// What kovre wants to back up: a list of source paths plus exclude globs.
-#[derive(Debug, Clone)]
-pub struct BackupSource {
-    pub paths: Vec<PathBuf>,
-    pub excludes: Vec<String>,
-}
-
-/// Domain-level summary of a snapshot — kept independent of rustic types so
-/// the CLI (and the dashboard) doesn't have to import `rustic_core`.
-/// Engines that don't have a notion of snapshot (the mirror backend)
-/// fabricate one per backup run from the `JobRun` metadata.
-#[derive(Debug, Clone)]
-pub struct SnapshotInfo {
-    pub id: String,
-    pub time: String,
-    pub paths: Vec<String>,
-    pub hostname: String,
-    pub tags: Vec<String>,
-    pub total_bytes_processed: Option<u64>,
-    pub data_added: Option<u64>,
-}
-
-/// Outcome of applying retention to a single job's history.
-#[derive(Debug, Clone, Default)]
-pub struct RetentionOutcome {
-    pub kept: usize,
-    pub forgotten: usize,
-}
-
-/// Backup engine — the abstraction every backend implements.
-///
-/// Implementations are expected to be cheap to construct (they hold a
-/// reference to the `RepoConfig`, no I/O at construction time) but may
-/// be long-running on the actual operations.
-pub trait BackupEngine: Send + Sync {
-    /// Materialize the repository on disk. For rustic, runs `init`. For
-    /// mirror (Phase 4 step 3), creates the destination directory.
-    /// Engines that detect an already-initialized repo return an error
-    /// the caller can match on (rustic surfaces "config file already
-    /// exists"); the dashboard treats that as 409 `already_initialized`.
-    fn init(&self) -> Result<()>;
-
-    /// Run a backup for `job_name` against `source`. Returns a snapshot
-    /// summary (synthesized for engines without a native snapshot
-    /// concept).
-    fn backup(&self, job_name: &str, source: BackupSource) -> Result<SnapshotInfo>;
-
-    /// Enumerate the snapshots known for this job. Mirror returns an
-    /// empty vec — its history lives in `.versions/` rather than as
-    /// discrete snapshots.
-    fn list_snapshots(&self, job_name: &str) -> Result<Vec<SnapshotInfo>>;
-
-    /// Apply retention rules. Rustic interprets the `keep_*` count
-    /// fields (`keep_last`, `keep_daily`, …) over snapshots; mirror
-    /// reads `keep_versions` and prunes its `.versions/` tree.
-    fn apply_retention(
-        &self,
-        job_name: &str,
-        retention: &Retention,
-    ) -> Result<RetentionOutcome>;
-}
-
-/// Pick the right engine for a repository, based on its `backend:`
-/// declaration in `kovre.yaml`.
-///
-/// `BackendKind::Mirror` returns a placeholder that fails every
-/// operation with a clear "not implemented yet" message until step 3
-/// lands the real `MirrorEngine`. This way a config that declares
-/// `backend: mirror` parses cleanly today, but a user who tries to
-/// run a backup against it gets actionable feedback rather than
-/// silent fall-back to rustic.
-pub fn engine_for(repo: &RepoConfig) -> Box<dyn BackupEngine> {
-    match repo.backend {
-        BackendKind::Rustic => Box::new(RusticEngine::new(repo.clone())),
-        BackendKind::Mirror => Box::new(MirrorEnginePlaceholder),
-    }
-}
-
-/// Stand-in for the mirror engine while Phase 4 step 3 is in flight.
-/// Every method returns the same error so callers know which step
-/// to wait for.
-struct MirrorEnginePlaceholder;
-
-impl BackupEngine for MirrorEnginePlaceholder {
-    fn init(&self) -> Result<()> {
-        anyhow::bail!(
-            "the `mirror` backend lands in Phase 4 step 3 — keep `backend: rustic` for now"
-        )
-    }
-    fn backup(&self, _job_name: &str, _source: BackupSource) -> Result<SnapshotInfo> {
-        anyhow::bail!("mirror backend not implemented yet (Phase 4 step 3)")
-    }
-    fn list_snapshots(&self, _job_name: &str) -> Result<Vec<SnapshotInfo>> {
-        // Return empty — the dashboard's snapshot sync should never
-        // abort just because a mirror repo is configured.
-        Ok(Vec::new())
-    }
-    fn apply_retention(
-        &self,
-        _job_name: &str,
-        _retention: &Retention,
-    ) -> Result<RetentionOutcome> {
-        Ok(RetentionOutcome::default())
-    }
-}
-
-// ---------------------------------------------------------------------
-// RusticEngine
-// ---------------------------------------------------------------------
-
-/// Backup engine backed by `rustic_core`. Stores deduplicated,
-/// encrypted, restic-compatible snapshots at the configured path.
+/// Backup engine backed by `rustic_core`.
 pub struct RusticEngine {
     repo: RepoConfig,
 }
@@ -210,12 +84,10 @@ impl BackupEngine for RusticEngine {
             .context("loading repository index")?;
 
         let mut backup_opts = BackupOptions::default();
-        // rustic's `Excludes::globs` are passed to `ignore::OverrideBuilder`,
-        // which uses *whitelist* semantics — bare patterns mean "include
-        // only matches, exclude everything else". We expose the more
-        // intuitive "exclude these" semantics (matching the YAML field
-        // name `excludes:` and restic conventions), so we negate every
-        // pattern.
+        // rustic's `Excludes::globs` uses whitelist semantics — bare
+        // patterns mean "include only matches". We expose the more
+        // intuitive "exclude these" semantics (matching restic), so we
+        // prefix every pattern with `!`.
         backup_opts.excludes.globs = source
             .excludes
             .into_iter()
@@ -347,10 +219,6 @@ impl BackupEngine for RusticEngine {
     }
 }
 
-// ---------------------------------------------------------------------
-// rustic helpers (private)
-// ---------------------------------------------------------------------
-
 fn build_keep_options(r: &Retention) -> KeepOptions {
     KeepOptions::default()
         .keep_last(r.keep_last.map(|v| v as i32))
@@ -385,6 +253,7 @@ fn snap_to_info(s: SnapshotFile) -> SnapshotInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BackendKind;
 
     #[test]
     fn build_keep_options_maps_all_fields() {
@@ -429,38 +298,6 @@ mod tests {
             keep_yearly: Some(1),
             ..Default::default()
         }));
-    }
-
-    #[test]
-    fn engine_for_returns_rustic_engine_by_default() {
-        use std::path::PathBuf;
-        let repo = RepoConfig {
-            path: PathBuf::from(r"C:\nope"),
-            backend: BackendKind::Rustic,
-            password_file: Some(PathBuf::from(r"C:\nope.key")),
-        };
-        let _engine = engine_for(&repo); // boxed trait object; just check it constructs
-    }
-
-    #[test]
-    fn engine_for_returns_placeholder_for_mirror() {
-        use std::path::PathBuf;
-        let repo = RepoConfig {
-            path: PathBuf::from(r"C:\nope"),
-            backend: BackendKind::Mirror,
-            password_file: None,
-        };
-        let engine = engine_for(&repo);
-        // The placeholder errors on init/backup but not on the read
-        // methods — those return empty so the dashboard's snapshot
-        // sync doesn't blow up over a mirror repo before step 3.
-        assert!(engine.init().is_err());
-        assert!(engine.backup("any", BackupSource { paths: vec![], excludes: vec![] }).is_err());
-        assert!(engine.list_snapshots("any").unwrap().is_empty());
-        assert_eq!(
-            engine.apply_retention("any", &Retention::default()).unwrap().forgotten,
-            0
-        );
     }
 
     #[test]

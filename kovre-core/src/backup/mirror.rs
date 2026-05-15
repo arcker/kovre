@@ -33,7 +33,9 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-use crate::backup::{BackupEngine, BackupSource, RetentionOutcome, SnapshotInfo, JOB_TAG_PREFIX};
+use crate::backup::{
+    BackupEngine, BackupSource, RetentionOutcome, SnapshotInfo, VerifyOutcome, JOB_TAG_PREFIX,
+};
 use crate::config::{Repository as RepoConfig, Retention};
 
 const VERSIONS_DIR: &str = ".versions";
@@ -234,6 +236,22 @@ impl BackupEngine for MirrorEngine {
         }
         info!(job = job_name, files = copied_files, "mirror restore complete");
         Ok(())
+    }
+
+    fn verify(&self) -> Result<VerifyOutcome> {
+        // Mirror stores files natively on the filesystem — there is
+        // no kovre-managed metadata to verify. The OS already
+        // guarantees readability when restore_latest runs, and
+        // filesystem-level corruption is out of scope (would equally
+        // affect the source). Surface the no-op explicitly so the
+        // UI can render an informative message.
+        Ok(VerifyOutcome {
+            ok: true,
+            messages: vec![
+                "mirror backend: nothing to verify — files are stored natively on the destination filesystem"
+                    .to_string(),
+            ],
+        })
     }
 
     fn apply_retention(
@@ -952,5 +970,21 @@ mod tests {
     fn list_snapshots_returns_empty_for_mirror() {
         let (_ws, engine, _source) = fixture();
         assert!(engine.list_snapshots("anything").unwrap().is_empty());
+    }
+
+    #[test]
+    fn verify_is_a_noop_with_informative_message() {
+        let (_ws, engine, _source) = fixture();
+        let outcome = engine.verify().unwrap();
+        assert!(outcome.ok, "mirror verify should always be ok");
+        assert!(
+            !outcome.messages.is_empty(),
+            "verify should surface a message explaining the no-op"
+        );
+        assert!(
+            outcome.messages[0].contains("mirror"),
+            "message should mention the backend: {:?}",
+            outcome.messages
+        );
     }
 }

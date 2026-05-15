@@ -443,6 +443,22 @@ fn dashboard_end_to_end() {
     let on_disk = std::fs::read_to_string(&fx.config).expect("read kovre.yaml");
     assert!(on_disk.contains("added_by_test:"));
     assert!(on_disk.contains("files:"));
+
+    // ---- POST /api/repositories/:name/verify — rustic happy path ----
+    let (verify_status, verify_body) = post_status(&a, "/api/repositories/test/verify");
+    assert_eq!(
+        verify_status, 200,
+        "verify should succeed on a freshly-initialized repo: {verify_body:#}"
+    );
+    assert_eq!(verify_body["ok"], true);
+    assert_eq!(verify_body["name"], "test");
+    assert!(verify_body["messages"].is_array(), "expected messages array");
+
+    // Unknown repository → 404.
+    let (verify_404_status, verify_404_body) =
+        post_status(&a, "/api/repositories/ghost/verify");
+    assert_eq!(verify_404_status, 404);
+    assert_eq!(verify_404_body["error"], "unknown_repository");
 }
 
 /// Minimal URL-encoder for path values (Windows backslash, colon,

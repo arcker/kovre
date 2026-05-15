@@ -183,6 +183,21 @@ pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Re
             },
         );
 
+        // POST /api/repositories/:name/verify — run an integrity check.
+        // For rustic this walks the metadata + index via rustic_core's
+        // `check`; for mirror it's a no-op (files are native on disk).
+        // Wrapped in `spawn_blocking` because the rustic path is sync
+        // and can take a while on large repos.
+        let cfg_for_verify: ConfigHandle = Arc::clone(&cfg_arc);
+        server = server.with_route_async(
+            Method::POST,
+            "/api/repositories/*/verify",
+            move |req| {
+                let cfg = cfg_for_verify.load_full();
+                async move { Ok(handle_verify_repo(req, cfg).await) }
+            },
+        );
+
         // GET /api/repositories/status — per-repo `{initialized: bool}`.
         // Drives the conditional rendering of the "init" button on
         // /repositories: a repo whose `<path>/config` exists on disk
@@ -538,12 +553,73 @@ async fn handle_init_repo(req: RouteRequest, cfg: Arc<Config>) -> RouteResponse 
 
 /// Pull `<name>` out of `/api/repositories/<name>/init`.
 fn extract_repo_name_for_init(path: &str) -> Option<String> {
+    extract_repo_name_for_action(path, "init")
+}
+
+/// Pull `<name>` out of `/api/repositories/<name>/verify`.
+fn extract_repo_name_for_verify(path: &str) -> Option<String> {
+    extract_repo_name_for_action(path, "verify")
+}
+
+fn extract_repo_name_for_action(path: &str, action: &str) -> Option<String> {
     let stripped = path.strip_prefix("/api/repositories/")?;
     let (name, rest) = stripped.split_once('/')?;
-    if rest != "init" || name.is_empty() {
+    if rest != action || name.is_empty() {
         return None;
     }
     Some(query::percent_decode(name))
+}
+
+/// `POST /api/repositories/:name/verify` — run an integrity check on
+/// the named repository. Always returns 200 with a structured outcome
+/// (`{ok: bool, messages: [..]}`); transport failures still surface as
+/// 4xx/5xx with a `{error: ...}` body.
+async fn handle_verify_repo(req: RouteRequest, cfg: Arc<Config>) -> RouteResponse {
+    let path = req.uri().path().to_string();
+    let name = match extract_repo_name_for_verify(&path) {
+        Some(n) => n,
+        None => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "could not parse repository name from path"}),
+            );
+        }
+    };
+
+    let repo = match cfg.repositories.get(&name) {
+        Some(r) => r.clone(),
+        None => {
+            return response::json_value(
+                StatusCode::NOT_FOUND,
+                &serde_json::json!({"error": "unknown_repository", "name": name}),
+            );
+        }
+    };
+
+    let result =
+        tokio::task::spawn_blocking(move || kovre_core::backup::engine_for(&repo).verify()).await;
+    match result {
+        Ok(Ok(outcome)) => response::json_value(
+            StatusCode::OK,
+            &serde_json::json!({
+                "ok": outcome.ok,
+                "messages": outcome.messages,
+                "name": name,
+            }),
+        ),
+        Ok(Err(e)) => response::json_value(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({
+                "error": "verify_failed",
+                "name": name,
+                "message": format!("{e:#}"),
+            }),
+        ),
+        Err(join_err) => response::json_value(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &serde_json::json!({"error": "verify_task_panicked", "reason": join_err.to_string()}),
+        ),
+    }
 }
 
 /// `GET /api/fs/stat?path=<p>` — answer whether a path exists, and what

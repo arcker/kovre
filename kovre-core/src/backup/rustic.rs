@@ -7,13 +7,15 @@ use anyhow::{Context, Result};
 use jiff::Zoned;
 use rustic_backend::BackendOptions;
 use rustic_core::{
-    repofile::SnapshotFile, BackupOptions, ConfigOptions, Credentials, KeepOptions, KeyOptions,
-    LocalDestination, LsOptions, PathList, Repository, RepositoryBackends, RepositoryOptions,
-    RestoreOptions, SnapshotOptions,
+    repofile::SnapshotFile, BackupOptions, CheckOptions, ConfigOptions, Credentials, KeepOptions,
+    KeyOptions, LocalDestination, LsOptions, PathList, Repository, RepositoryBackends,
+    RepositoryOptions, RestoreOptions, SnapshotOptions,
 };
 use tracing::{info, warn};
 
-use crate::backup::{BackupEngine, BackupSource, RetentionOutcome, SnapshotInfo, JOB_TAG_PREFIX};
+use crate::backup::{
+    BackupEngine, BackupSource, RetentionOutcome, SnapshotInfo, VerifyOutcome, JOB_TAG_PREFIX,
+};
 use crate::config::{Repository as RepoConfig, Retention};
 
 /// Backup engine backed by `rustic_core`.
@@ -277,6 +279,41 @@ impl BackupEngine for RusticEngine {
             "rustic restore complete"
         );
         Ok(())
+    }
+
+    fn verify(&self) -> Result<VerifyOutcome> {
+        let backends = self.make_backends()?;
+        let creds = self.credentials()?;
+        let opts = RepositoryOptions::default();
+
+        let repository = Repository::new(&opts, &backends)
+            .context("creating repository handle")?
+            .open(&creds)
+            .context("opening repository (wrong password?)")?;
+
+        // Defaults: metadata + index walk; no pack re-read. That's
+        // the right tradeoff for a UI "Verify" button — fast enough
+        // to run on demand without a progress UI, but still catches
+        // corruption in index, pack references, snapshot trees.
+        let results = repository
+            .check(CheckOptions::default())
+            .context("running rustic check")?;
+
+        let messages: Vec<String> = results
+            .0
+            .iter()
+            .map(|(level, err)| format!("[{level:?}] {err}"))
+            .collect();
+        let ok = results.is_ok().is_ok();
+
+        info!(
+            repository = %self.repo.path.display(),
+            ok,
+            findings = messages.len(),
+            "rustic verify complete"
+        );
+
+        Ok(VerifyOutcome { ok, messages })
     }
 }
 

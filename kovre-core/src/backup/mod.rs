@@ -59,6 +59,17 @@ pub struct RetentionOutcome {
     pub forgotten: usize,
 }
 
+/// Outcome of a repository integrity check.
+///
+/// `ok = true` means no severe error was found. `messages` carries
+/// any human-readable findings (warnings or per-backend info such as
+/// "mirror backend has no metadata to verify"); empty by default.
+#[derive(Debug, Clone, Default)]
+pub struct VerifyOutcome {
+    pub ok: bool,
+    pub messages: Vec<String>,
+}
+
 /// Backup engine — the abstraction every backend implements.
 ///
 /// Implementations should be cheap to construct (they only hold a
@@ -102,6 +113,17 @@ pub trait BackupEngine: Send + Sync {
     /// Returns an error if the repository has no state to restore
     /// for this job (no snapshots / no mirrored files).
     fn restore_latest(&self, job_name: &str, dest_dir: &std::path::Path) -> Result<()>;
+
+    /// Run an integrity check on the repository.
+    ///
+    /// For rustic: walks the metadata + index, verifying that
+    /// every snapshot tree and pack referenced is reachable and
+    /// uncorrupted. Doesn't re-read pack data by default (fast).
+    ///
+    /// For mirror: no-op (files live natively on disk; the OS is
+    /// the source of truth and `restore_latest` already exercises
+    /// readability). Returned `messages` explains this.
+    fn verify(&self) -> Result<VerifyOutcome>;
 }
 
 /// Pick the right engine for a repository, based on its `backend:`

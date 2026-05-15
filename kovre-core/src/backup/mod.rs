@@ -87,6 +87,21 @@ pub trait BackupEngine: Send + Sync {
         job_name: &str,
         retention: &Retention,
     ) -> Result<RetentionOutcome>;
+
+    /// Restore the latest state of `job_name` into `dest_dir`.
+    ///
+    /// For rustic: the most recent snapshot tagged
+    /// `kovre-job:<job_name>`. For mirror: the current canonical
+    /// state (`.versions/` is ignored).
+    ///
+    /// `dest_dir` is created if missing. Existing contents are left
+    /// in place — restored files overwrite their counterparts, but
+    /// extra files in `dest_dir` that aren't in the backup are
+    /// preserved.
+    ///
+    /// Returns an error if the repository has no state to restore
+    /// for this job (no snapshots / no mirrored files).
+    fn restore_latest(&self, job_name: &str, dest_dir: &std::path::Path) -> Result<()>;
 }
 
 /// Pick the right engine for a repository, based on its `backend:`

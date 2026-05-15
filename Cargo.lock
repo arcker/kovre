@@ -2083,6 +2083,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]

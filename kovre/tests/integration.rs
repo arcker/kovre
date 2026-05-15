@@ -332,3 +332,209 @@ fn run_all_continues_when_one_job_fails() {
         "expected `good` to produce its snapshot despite `bad` failing; got:\n{stdout}",
     );
 }
+
+// ---------------------------------------------------------------------
+// Restore round-trip tests
+//
+// The reliability claim of any backup tool is: "if I back this up, I
+// can get it back, byte-for-byte." These two tests assert that claim
+// for each backend by going backup → restore → walk both trees and
+// diff their contents. The fixture mixes text, binary, accents,
+// spaces, nesting and an empty file to maximize the chance of catching
+// path/encoding regressions.
+// ---------------------------------------------------------------------
+
+/// Fixture content shared by both restore tests. The keys are forward-
+/// slash relative paths (will be split on `/` when materialized).
+fn restore_fixture_files() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("hello.txt", b"Hello, world!\n".to_vec()),
+        ("empty.bin", Vec::new()),
+        ("nested/deep/notes.md", b"# Title\n\nBody.\n".to_vec()),
+        (
+            "with spaces.txt",
+            "Ligne avec espaces et accents éàü.\n".as_bytes().to_vec(),
+        ),
+        // 4 KiB of pseudo-random bytes so we exercise the chunker /
+        // copy path beyond ASCII.
+        (
+            "binary.dat",
+            (0u16..4096).map(|i| (i % 251) as u8).collect(),
+        ),
+    ]
+}
+
+fn write_source_tree(root: &Path, files: &[(&str, Vec<u8>)]) {
+    for (rel, content) in files {
+        let path = root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&path, content).unwrap();
+    }
+}
+
+/// Walk `root` and return every regular file's relative path + content,
+/// sorted by relative path. The sort makes assertions order-independent.
+fn snapshot_tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out: Vec<(PathBuf, Vec<u8>)> = walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| {
+            let rel = e.path().strip_prefix(root).unwrap().to_path_buf();
+            let bytes = fs::read(e.path()).unwrap();
+            (rel, bytes)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Walk `dest` and return the parent directory of the first file
+/// whose basename matches `sentinel`. Used to locate the restored
+/// source tree without hard-coding the backend's path conventions
+/// (rustic stores the absolute source path; mirror uses the source
+/// basename).
+fn find_restored_root(dest: &Path, sentinel: &str) -> PathBuf {
+    for entry in walkdir::WalkDir::new(dest) {
+        let entry = entry.expect("walk dest");
+        if entry.file_type().is_file()
+            && entry.file_name().to_string_lossy() == sentinel
+        {
+            return entry
+                .path()
+                .parent()
+                .expect("sentinel must have a parent")
+                .to_path_buf();
+        }
+    }
+    panic!(
+        "could not find sentinel `{sentinel}` anywhere under `{}`",
+        dest.display()
+    );
+}
+
+/// Assert two directory trees contain the exact same set of files with
+/// the exact same byte content. Path-only mismatches and content-only
+/// mismatches both fail with a precise message.
+fn assert_trees_match(expected_root: &Path, actual_root: &Path) {
+    let expected = snapshot_tree(expected_root);
+    let actual = snapshot_tree(actual_root);
+
+    let exp_paths: Vec<&Path> = expected.iter().map(|(p, _)| p.as_path()).collect();
+    let act_paths: Vec<&Path> = actual.iter().map(|(p, _)| p.as_path()).collect();
+    assert_eq!(
+        exp_paths, act_paths,
+        "restored file listing differs from source:\n  source: {:?}\n  restored: {:?}",
+        exp_paths, act_paths,
+    );
+
+    for ((p_exp, c_exp), (_p_act, c_act)) in expected.iter().zip(actual.iter()) {
+        assert_eq!(
+            c_exp.len(),
+            c_act.len(),
+            "size mismatch for `{}`: expected {} bytes, got {} bytes",
+            p_exp.display(),
+            c_exp.len(),
+            c_act.len(),
+        );
+        assert_eq!(
+            c_exp,
+            c_act,
+            "content mismatch for `{}` (sizes match but bytes differ)",
+            p_exp.display(),
+        );
+    }
+}
+
+#[test]
+fn restore_round_trip_rustic() {
+    use kovre_core::backup::{engine_for, BackupSource};
+    use kovre_core::config::{BackendKind, Repository as RepoConfig};
+
+    let workspace = TempDir::new().unwrap();
+    let root = workspace.path();
+    let source = root.join("source");
+    fs::create_dir_all(&source).unwrap();
+    write_source_tree(&source, &restore_fixture_files());
+
+    let repo_path = root.join("repo");
+    fs::create_dir_all(&repo_path).unwrap();
+    let password_file = root.join("repo.key");
+    fs::write(&password_file, "restore-test-pass\n").unwrap();
+
+    let repo_cfg = RepoConfig {
+        path: repo_path.clone(),
+        backend: BackendKind::Rustic,
+        password_file: Some(password_file.clone()),
+    };
+
+    let engine = engine_for(&repo_cfg);
+    engine.init().expect("init rustic repo");
+    engine
+        .backup(
+            "round-trip",
+            BackupSource {
+                paths: vec![source.clone()],
+                excludes: vec![],
+            },
+        )
+        .expect("backup");
+
+    let dest = root.join("restored");
+    engine_for(&repo_cfg)
+        .restore_latest("round-trip", &dest)
+        .expect("restore_latest");
+
+    // rustic restores into a path that reflects the source's absolute
+    // path on disk (drops the `:` from the drive letter on Windows).
+    // Rather than hard-coding that convention, locate the restored
+    // root by its sentinel file.
+    let restored_root = find_restored_root(&dest, "hello.txt");
+    assert_trees_match(&source, &restored_root);
+}
+
+#[test]
+fn restore_round_trip_mirror() {
+    use kovre_core::backup::{engine_for, BackupSource};
+    use kovre_core::config::{BackendKind, Repository as RepoConfig};
+
+    let workspace = TempDir::new().unwrap();
+    let root = workspace.path();
+    let source = root.join("source");
+    fs::create_dir_all(&source).unwrap();
+    write_source_tree(&source, &restore_fixture_files());
+
+    let repo_path = root.join("repo");
+    fs::create_dir_all(&repo_path).unwrap();
+
+    let repo_cfg = RepoConfig {
+        path: repo_path.clone(),
+        backend: BackendKind::Mirror,
+        password_file: None,
+    };
+
+    let engine = engine_for(&repo_cfg);
+    engine.init().expect("init mirror repo");
+    engine
+        .backup(
+            "round-trip",
+            BackupSource {
+                paths: vec![source.clone()],
+                excludes: vec![],
+            },
+        )
+        .expect("backup");
+
+    let dest = root.join("restored");
+    engine_for(&repo_cfg)
+        .restore_latest("round-trip", &dest)
+        .expect("restore_latest");
+
+    // Mirror lays out the canonical files at `<dest>/<source
+    // basename>/...` — locate it via the sentinel for symmetry with
+    // the rustic test.
+    let restored_root = find_restored_root(&dest, "hello.txt");
+    assert_trees_match(&source, &restored_root);
+}

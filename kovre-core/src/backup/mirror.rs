@@ -181,6 +181,61 @@ impl BackupEngine for MirrorEngine {
         Ok(Vec::new())
     }
 
+    fn restore_latest(&self, job_name: &str, dest_dir: &Path) -> Result<()> {
+        let job_root = self.job_root(job_name);
+        if !job_root.exists() {
+            anyhow::bail!(
+                "nothing to restore: mirror job root `{}` does not exist (job never ran?)",
+                job_root.display()
+            );
+        }
+        std::fs::create_dir_all(dest_dir).with_context(|| {
+            format!("creating restore destination `{}`", dest_dir.display())
+        })?;
+
+        let mut copied_files = 0usize;
+        for entry in WalkDir::new(&job_root).follow_links(false) {
+            let entry = entry.context("walking mirror job root")?;
+            let src_path = entry.path();
+            if src_path == job_root {
+                continue;
+            }
+            let rel = src_path
+                .strip_prefix(&job_root)
+                .expect("walkdir entry must be under job_root");
+            // Skip the .versions/ archive entirely — restore_latest
+            // restores the canonical state, not historical versions.
+            if rel
+                .components()
+                .next()
+                .map(|c| c.as_os_str() == std::ffi::OsStr::new(VERSIONS_DIR))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let target = dest_dir.join(rel);
+            if entry.file_type().is_dir() {
+                std::fs::create_dir_all(&target).with_context(|| {
+                    format!("creating restored directory `{}`", target.display())
+                })?;
+            } else if entry.file_type().is_file() {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                copy_file_atomic(src_path, &target)?;
+                copied_files += 1;
+            }
+        }
+
+        if copied_files == 0 {
+            anyhow::bail!(
+                "nothing to restore: mirror job `{job_name}` contains no files (excluding .versions/)"
+            );
+        }
+        info!(job = job_name, files = copied_files, "mirror restore complete");
+        Ok(())
+    }
+
     fn apply_retention(
         &self,
         job_name: &str,

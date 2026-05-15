@@ -1,14 +1,15 @@
 //! `BackupEngine` impl backed by `rustic_core` — deduplicated,
 //! encrypted, restic-compatible storage.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use jiff::Zoned;
 use rustic_backend::BackendOptions;
 use rustic_core::{
     repofile::SnapshotFile, BackupOptions, ConfigOptions, Credentials, KeepOptions, KeyOptions,
-    PathList, Repository, RepositoryBackends, RepositoryOptions, SnapshotOptions,
+    LocalDestination, LsOptions, PathList, Repository, RepositoryBackends, RepositoryOptions,
+    RestoreOptions, SnapshotOptions,
 };
 use tracing::{info, warn};
 
@@ -216,6 +217,66 @@ impl BackupEngine for RusticEngine {
             kept,
             forgotten: to_forget.len(),
         })
+    }
+
+    fn restore_latest(&self, job_name: &str, dest_dir: &Path) -> Result<()> {
+        let backends = self.make_backends()?;
+        let creds = self.credentials()?;
+        let opts = RepositoryOptions::default();
+
+        let repository = Repository::new(&opts, &backends)
+            .context("creating repository handle")?
+            .open(&creds)
+            .context("opening repository (wrong password?)")?
+            .to_indexed()
+            .context("loading repository index")?;
+
+        let target_tag = format!("{JOB_TAG_PREFIX}{job_name}");
+        let snapshot = repository
+            .get_all_snapshots()
+            .context("listing snapshots")?
+            .into_iter()
+            .filter(|s| s.tags.contains(&target_tag))
+            // Pick the newest by snapshot time. `SnapshotFile::time`
+            // is a chronological string but the field is jiff-typed
+            // and `Ord`-able, so we can compare directly.
+            .max_by(|a, b| a.time.cmp(&b.time))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no snapshots found for job `{job_name}` (tag `{target_tag}`)"
+                )
+            })?;
+
+        std::fs::create_dir_all(dest_dir).with_context(|| {
+            format!("creating restore destination `{}`", dest_dir.display())
+        })?;
+        let dest_str = dest_dir.to_string_lossy().to_string();
+        let dest = LocalDestination::new(&dest_str, true, false)
+            .context("opening restore destination")?;
+
+        let root_node = repository
+            .node_from_snapshot_and_path(&snapshot, "")
+            .context("locating snapshot root node")?;
+        let ls_opts = LsOptions::default();
+        let streamer = repository
+            .ls(&root_node, &ls_opts)
+            .context("streaming snapshot tree")?;
+
+        let restore_opts = RestoreOptions::default();
+        let plan = repository
+            .prepare_restore(&restore_opts, streamer.clone(), &dest, false)
+            .context("preparing restore plan")?;
+        repository
+            .restore(plan, &restore_opts, streamer, &dest)
+            .context("executing restore")?;
+
+        info!(
+            job = job_name,
+            snapshot = %snapshot.id,
+            dest = %dest_dir.display(),
+            "rustic restore complete"
+        );
+        Ok(())
     }
 }
 

@@ -13,9 +13,14 @@ export interface ParsedConfig {
 	jobs: Record<string, JobEntry>;
 }
 
+export type BackendKind = 'rustic' | 'mirror';
+
 export interface RepositoryEntry {
 	path: string;
-	password_file: string;
+	/** Storage format. Defaults to 'rustic' when omitted in the YAML. */
+	backend?: BackendKind;
+	/** Required for rustic, optional for mirror (mirror has no passphrase). */
+	password_file?: string;
 }
 
 export interface JobEntry {
@@ -40,6 +45,8 @@ export interface JobDraft {
 export interface RepositoryDraft {
 	name: string;
 	path: string;
+	backend: BackendKind;
+	/** Empty string when the form doesn't need it (mirror). */
 	password_file: string;
 }
 
@@ -72,7 +79,15 @@ function emitRepositories(repos: Record<string, RepositoryEntry>): string {
 	for (const [name, entry] of Object.entries(repos)) {
 		out.push(`  ${scalar(name)}:`);
 		out.push(`    path: ${scalar(entry.path)}`);
-		out.push(`    password_file: ${scalar(entry.password_file)}`);
+		// Only emit `backend:` when it diverges from the rustic default,
+		// to keep existing kovre.yaml files visually unchanged when the
+		// dashboard rewrites them.
+		if (entry.backend && entry.backend !== 'rustic') {
+			out.push(`    backend: ${scalar(entry.backend)}`);
+		}
+		if (entry.password_file && entry.password_file.length > 0) {
+			out.push(`    password_file: ${scalar(entry.password_file)}`);
+		}
 	}
 	return out.join('\n');
 }
@@ -173,12 +188,19 @@ export function removeJob(parsed: ParsedConfig, name: string): ParsedConfig {
 	return { agent: parsed.agent, repositories: { ...parsed.repositories }, jobs };
 }
 
+function draftToRepoEntry(draft: RepositoryDraft): RepositoryEntry {
+	const entry: RepositoryEntry = { path: draft.path, backend: draft.backend };
+	const pwd = draft.password_file.trim();
+	if (pwd.length > 0) entry.password_file = pwd;
+	return entry;
+}
+
 export function addRepository(parsed: ParsedConfig, draft: RepositoryDraft): ParsedConfig {
 	return {
 		agent: parsed.agent,
 		repositories: {
 			...parsed.repositories,
-			[draft.name]: { path: draft.path, password_file: draft.password_file }
+			[draft.name]: draftToRepoEntry(draft)
 		},
 		jobs: { ...parsed.jobs }
 	};
@@ -192,13 +214,13 @@ export function updateRepository(
 	const ordered: Record<string, RepositoryEntry> = {};
 	for (const k of Object.keys(parsed.repositories)) {
 		if (k === name) {
-			ordered[draft.name] = { path: draft.path, password_file: draft.password_file };
+			ordered[draft.name] = draftToRepoEntry(draft);
 		} else {
 			ordered[k] = parsed.repositories[k];
 		}
 	}
 	if (!Object.prototype.hasOwnProperty.call(ordered, draft.name)) {
-		ordered[draft.name] = { path: draft.path, password_file: draft.password_file };
+		ordered[draft.name] = draftToRepoEntry(draft);
 	}
 
 	// Repository renames also have to update any job that referenced the

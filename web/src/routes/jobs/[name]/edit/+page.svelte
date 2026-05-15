@@ -17,7 +17,7 @@
 	} from '$lib/yaml';
 	import DirInput from '$lib/DirInput.svelte';
 
-	const jobName = $derived(page.params.name);
+	const jobName = $derived(page.params.name ?? '');
 
 	let template = $state<Template | null>(null);
 	let templates = $state<Template[]>([]);
@@ -35,8 +35,21 @@
 		keep_last: '',
 		keep_daily: '',
 		keep_weekly: '',
-		keep_monthly: ''
+		keep_monthly: '',
+		keep_versions: ''
 	});
+
+	// Which backend the currently-selected repository uses. Drives
+	// the retention UI: rustic exposes keep_last/daily/weekly/monthly,
+	// mirror exposes keep_versions only.
+	const selectedBackend = $derived(
+		(config?.parsed.repositories?.[repository]?.backend ?? 'rustic') as 'rustic' | 'mirror'
+	);
+	const retentionKeys = $derived(
+		selectedBackend === 'mirror'
+			? (['keep_versions'] as const)
+			: (['keep_last', 'keep_daily', 'keep_weekly', 'keep_monthly'] as const)
+	);
 
 	let busy = $state(false);
 	let submitError = $state<string | null>(null);
@@ -248,10 +261,20 @@
 
 		<fieldset>
 			<legend>Retention</legend>
+			<p class="retention-hint">
+				{#if selectedBackend === 'mirror'}
+					Mirror keeps the current canonical state plus archived versions of overwritten/deleted
+					files under <code>.versions/</code>. <code>keep_versions</code> caps how many of those
+					archived versions are kept per file.
+				{:else}
+					Rustic snapshots are independent. Each <code>keep_*</code> rule retains the most recent
+					matching snapshots; the others are forgotten after each backup.
+				{/if}
+			</p>
 			<div class="retention">
-				{#each ['keep_last', 'keep_daily', 'keep_weekly', 'keep_monthly'] as k (k)}
+				{#each retentionKeys as k (k)}
 					<label class="retention-row">
-						<span class="retention-label">{k.replace('keep_', 'keep last/by ')}</span>
+						<span class="retention-label">{k.replace('keep_', 'keep ')}</span>
 						<input
 							type="number"
 							min="1"
@@ -376,6 +399,15 @@
 		color: #e6e8eb;
 	}
 
+	.retention-hint {
+		color: #9aa3b2;
+		font-size: 0.85rem;
+		margin: 0 0 0.7rem;
+	}
+	.retention-hint code {
+		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
+		color: #c5cad3;
+	}
 	.retention {
 		display: grid;
 		grid-template-columns: repeat(2, 1fr);

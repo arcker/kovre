@@ -12,7 +12,7 @@
 	import { addJob, emitConfigYaml, type JobDraft } from '$lib/yaml';
 	import DirInput from '$lib/DirInput.svelte';
 
-	const templateName = $derived(page.params.name);
+	const templateName = $derived(page.params.name ?? '');
 
 	let template = $state<Template | null>(null);
 	let config = $state<ConfigPayload | null>(null);

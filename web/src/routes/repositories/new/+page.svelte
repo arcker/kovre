@@ -11,7 +11,12 @@
 	let busy = $state(false);
 	let submitError = $state<string | null>(null);
 
-	let draft = $state<RepositoryDraft>({ name: '', path: '', password_file: '' });
+	let draft = $state<RepositoryDraft>({
+		name: '',
+		path: '',
+		backend: 'rustic',
+		password_file: ''
+	});
 
 	onMount(async () => {
 		try {
@@ -34,15 +39,16 @@
 		try {
 			const yaml = emitConfigYaml(addRepository(config.parsed, d));
 			await putConfig(yaml);
-			// Auto-init the rustic repo so the first backup doesn't
-			// fail with "No repository config file found". If the path
-			// already had a rustic repo (existing NAS backup folder),
-			// the server returns 409 and initRepository treats that as
-			// a benign no-op.
+			// Auto-init so the first backup doesn't fail with
+			// "No repository config file found" (rustic) or "destination
+			// does not exist" (mirror). If the rustic path already had
+			// a repo (existing NAS backup folder), the server returns
+			// 409 and initRepository treats that as a benign no-op.
 			try {
 				await initRepository(d.name);
 			} catch (initErr) {
-				submitError = `Config saved but rustic init failed: ${initErr instanceof Error ? initErr.message : String(initErr)}. You can retry from the repositories list.`;
+				const label = d.backend === 'mirror' ? 'mirror init' : 'rustic init';
+				submitError = `Config saved but ${label} failed: ${initErr instanceof Error ? initErr.message : String(initErr)}. You can retry from the repositories list.`;
 				return;
 			}
 			goto('/repositories');

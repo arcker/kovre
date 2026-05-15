@@ -1,5 +1,7 @@
 // Typed fetch helpers for kovre's `/api/*` endpoints.
 
+import type { ParsedConfig } from './yaml';
+
 export interface JobRun {
 	id: string;
 	job_name: string;
@@ -29,6 +31,8 @@ export interface Retention {
 	keep_weekly?: number | null;
 	keep_monthly?: number | null;
 	keep_yearly?: number | null;
+	/** Mirror backend only: how many archived versions to keep per file. */
+	keep_versions?: number | null;
 }
 
 export interface Job {
@@ -98,11 +102,7 @@ export interface FsListing {
 
 export interface ConfigPayload {
 	yaml: string;
-	parsed: {
-		agent: { data_dir: string; log_level: string };
-		repositories: Record<string, { path: string; password_file: string }>;
-		jobs: Record<string, unknown>;
-	};
+	parsed: ParsedConfig;
 }
 
 export const listTemplates = (): Promise<Template[]> => getJson<Template[]>('/api/templates');
@@ -181,6 +181,31 @@ export async function initRepository(
 }
 
 export const getConfig = (): Promise<ConfigPayload> => getJson<ConfigPayload>('/api/config');
+
+export interface VerifyOutcome {
+	ok: boolean;
+	messages: string[];
+	name: string;
+}
+
+/** Run an integrity check on a repository. Always resolves (server
+ *  returns 200 even when ok=false); throws only on transport / 4xx. */
+export async function verifyRepository(name: string): Promise<VerifyOutcome> {
+	const resp = await fetch(`/api/repositories/${encodeURIComponent(name)}/verify`, {
+		method: 'POST'
+	});
+	const body = await resp.json().catch(() => ({}) as Record<string, unknown>);
+	if (resp.ok) {
+		return body as VerifyOutcome;
+	}
+	const message =
+		typeof body.message === 'string'
+			? body.message
+			: typeof body.error === 'string'
+				? body.error
+				: `HTTP ${resp.status}`;
+	throw new Error(message);
+}
 
 /** Replace the running config. Server validates the YAML before
  *  touching the file or the in-memory state; on failure the response

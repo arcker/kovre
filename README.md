@@ -70,6 +70,55 @@ Voir `kovre.example.yaml` pour un exemple complet avec les trois templates built
 
 Le `password_file` doit exister avant le premier `init-repo` ; il contient la passphrase du dépôt rustic en clair (un mot par ligne, retours à la ligne ignorés). Sécuriser les ACL Windows en conséquence.
 
+## Backends (Phase 4)
+
+Chaque `repositories.<name>` a un `backend:` qui choisit comment les fichiers sont stockés :
+
+```yaml
+repositories:
+  nas:                          # backend rustic (défaut, peut être omis)
+    path: \\nas.local\backup\kovre
+    password_file: C:\ProgramData\Kovre\nas.key
+
+  photos:
+    path: \\nas.local\photos-mirror
+    backend: mirror             # nouveau Phase 4
+    # password_file omis : mirror n'a pas de passphrase
+
+jobs:
+  family-photos:
+    repository: photos
+    paths:
+      - D:\Pictures
+    retention:
+      keep_versions: 5          # spécifique mirror
+```
+
+| Backend | Format | Cible | Restore | Verify |
+|---|---|---|---|---|
+| **rustic** (défaut) | restic-compatible : encrypted, dédupliqué, snapshots immutables | logs, dev trees, dumps, tout ce qui n'a pas besoin d'être browsable en plain | via `kovre` (Phase 4) ou CLI `rustic` standard | `repository.check()` (metadata + index) |
+| **mirror** | fichiers natifs 1:1 sous `<repo>/<job>/<basename>/`, versions archivées dans `<repo>/<job>/.versions/<rel>/<stem>-<ts>.<ext>` | photos, documents, sauvegardes de jeux — tout ce qu'on veut pouvoir browser/copier direct depuis Explorer | `cp` direct depuis la destination | no-op (fichiers natifs, l'OS garantit la lisibilité) |
+
+Détection de changement côté mirror : `mtime + size`. Faux positif acceptable (un fichier touché mais identique sera archivé une fois pour rien). `.versions/` est un nom réservé — un dossier source qui contient `.versions/` à la racine est refusé pour éviter l'auto-collision.
+
+Retention :
+- **rustic** : `keep_last`, `keep_hourly`, `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_yearly` (sur les snapshots).
+- **mirror** : `keep_versions` (par fichier canonique dans `.versions/`).
+
+## Restore (Phase 4)
+
+kovre expose maintenant `restore_latest(job, dest)` au niveau du trait `BackupEngine`. Un test e2e (`cargo test restore_round_trip`) crée un fixture avec texte/binaire/accents/espaces/imbrication, fait backup + restore, et asserte l'égalité octet-à-octet — pour les deux backends. C'est la garantie de base ("ce que je sauvegarde, je peux le récupérer").
+
+**Pas encore d'UI restore** dans le dashboard. Phase 5 livrera le bouton + le picker de snapshot/version.
+
+En attendant, restore manuel :
+
+- **rustic** :
+  ```sh
+  rustic -r \\nas.local\backup\kovre --password-file C:\ProgramData\Kovre\nas.key restore latest:/ C:\restore-test
+  ```
+- **mirror** : c'est juste des fichiers sur disque, `robocopy` / Explorer / `xcopy` selon préférence. `.versions/<rel>/<stem>-<ts>.<ext>` contient les versions antérieures à l'état courant.
+
 ## Utilisation
 
 ### CLI (Phase 1)
@@ -153,14 +202,6 @@ Un job peut aussi être déclaré sans template : il faut alors fournir `paths` 
 - **Modification / suppression de jobs existants** non exposée dans l'UI — le wizard ne sait qu'ajouter. À la main dans le YAML pour le reste.
 - **Validation YAML côté client minimale** — le wizard vérifie juste nom unique + champs requis. La vraie validation (champ inconnu, repo référencé inexistant, etc.) revient du serveur en `400` avec ligne/colonne.
 
-## Restore
-
-Phase 2 ne fournit toujours pas de commande `restore` côté kovre. Les snapshots étant au format restic standard :
-
-```sh
-rustic -r \\nas.local\backup\kovre --password-file C:\ProgramData\Kovre\nas.key restore latest:/ /tmp/restore
-```
-
 ## Validation manuelle de la compat rustic CLI
 
 Les tests automatisés (`cargo test`) couvrent backup/restore via `rustic_core` directement, sans dépendre du binaire `rustic`. Pour valider que les snapshots produits sont aussi lisibles par la CLI `rustic` standard (DoD Phase 1) :
@@ -182,16 +223,18 @@ robocopy C:\Users\<you>\Documents C:\restore-test\Documents /L /MIR /NJH /NJS
 
 ## Tests
 
-Le workspace tourne 95 tests :
+Le workspace tourne 117 tests (Phase 1+2+3+4) :
 
 ```sh
-cargo test                     # 95 tests, ~3-4 min sur Windows
-cargo test --test dashboard    # le e2e du dashboard seul (~1 min)
-cargo test --test integration  # les tests Phase 1 (~3 min)
-cargo test -p kovre-wasm       # logique de tri WASM (instantané)
+cargo test                                            # 117 tests, ~4-5 min sur Windows
+cargo test --test dashboard                           # le e2e du dashboard seul (~80 s)
+cargo test --test integration                         # les tests Phase 1+4 (~3 min, inclut restore_round_trip)
+cargo test -p kovre-wasm                              # logique de tri WASM (instantané)
 ```
 
-Le test `dashboard` spawn le binaire kovre, attaque ses endpoints HTTP, et vérifie le flux complet : run → success → snapshot synced → SPA shell servie, puis Phase 3 (GET /api/templates, GET /api/fs, PUT /api/config valide → live reload, PUT /api/config invalide → 400 sans mutation). Il a besoin de `web/build/` peuplé pour valider la SPA — sinon les assertions sur le shell HTML échouent avec un message qui pointe vers `npm run build`.
+Le test `dashboard` spawn le binaire kovre, attaque ses endpoints HTTP, et vérifie le flux complet : run rustic → success → snapshot synced → SPA shell servie, puis Phase 3 (GET /api/templates, GET /api/fs, PUT /api/config valide → live reload, PUT /api/config invalide → 400 sans mutation), puis Phase 4 (verify route ; pipeline mirror complet : PUT /api/config avec `backend: mirror`, init, 4 runs séquentiels avec modifications source, asserts `.versions/` et retention `keep_versions`). Il a besoin de `web/build/` peuplé pour valider la SPA — sinon les assertions sur le shell HTML échouent avec un message qui pointe vers `npm run build`.
+
+`cargo test --test integration restore_round_trip` couvre la promesse de fiabilité (backup → restore → diff octet-à-octet sur fixture variée) pour les deux backends.
 
 ## Issues remontées upstream
 

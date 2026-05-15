@@ -61,12 +61,17 @@
 	function submit() {
 		nameError = draft.name.trim() === '' ? 'name is required' : null;
 		pathError = draft.path.trim() === '' ? 'path is required' : null;
-		passwordError = draft.password_file.trim() === '' ? 'password file is required' : null;
+		// Password file is required for rustic only.
+		passwordError =
+			draft.backend === 'rustic' && draft.password_file.trim() === ''
+				? 'password file is required for the rustic backend'
+				: null;
 		if (nameError || pathError || passwordError) return;
 		onsubmit({
 			name: draft.name.trim(),
 			path: draft.path.trim(),
-			password_file: draft.password_file.trim()
+			backend: draft.backend,
+			password_file: draft.backend === 'rustic' ? draft.password_file.trim() : ''
 		});
 	}
 </script>
@@ -89,16 +94,38 @@
 	</label>
 
 	<label>
+		<span class="label">Backend</span>
+		<select bind:value={draft.backend}>
+			<option value="rustic">rustic — deduplicated, encrypted (recommended for offsite/dev)</option>
+			<option value="mirror">mirror — plain files + .versions/ (browsable, no passphrase)</option>
+		</select>
+		<span class="hint">
+			<strong>rustic</strong> is restic-compatible: encrypted, deduplicated, snapshot-based. Best for
+			anything you can't read in plain Explorer (logs, dev trees, dumps). Requires a password file.
+			<br />
+			<strong>mirror</strong> writes files 1:1 to the destination; overwritten and deleted files
+			move to a sibling <code>.versions/</code> folder. Best for photos, documents, anything you
+			want to browse straight from Windows Explorer. No passphrase, no encryption.
+		</span>
+	</label>
+
+	<label>
 		<span class="label">Path</span>
 		<DirInput bind:value={draft.path} placeholder="\\nas.local\backup\kovre or D:\Backups" />
 		<span class="hint">
-			Filesystem path or UNC share where rustic stores blobs / index / snapshots.
+			{#if draft.backend === 'mirror'}
+				Filesystem path or UNC share where mirrored files will land. Inside this folder
+				kovre creates one subdirectory per job, plus a sibling <code>.versions/</code>.
+			{:else}
+				Filesystem path or UNC share where rustic stores blobs / index / snapshots.
+			{/if}
 		</span>
 		{#if pathError}
 			<span class="error">{pathError}</span>
 		{/if}
 	</label>
 
+	{#if draft.backend === 'rustic'}
 	<label>
 		<span class="label">Password file</span>
 		<div class="password-row">
@@ -145,6 +172,12 @@
 			<span class="success">{generateMessage}</span>
 		{/if}
 	</label>
+	{:else}
+	<p class="mirror-note">
+		Mirror backend: no passphrase needed — files are written natively. Make sure the destination
+		folder's ACLs already restrict access to your Windows user (kovre doesn't manage permissions).
+	</p>
+	{/if}
 
 	<div class="actions">
 		<button type="submit" class="submit" disabled={busy}>
@@ -195,7 +228,8 @@
 		color: #c5cad3;
 	}
 
-	input[type='text'] {
+	input[type='text'],
+	select {
 		padding: 0.5rem 0.75rem;
 		background: #161a21;
 		border: 1px solid #2a2f38;
@@ -206,9 +240,21 @@
 		width: 100%;
 		box-sizing: border-box;
 	}
-	input[type='text']:focus {
+	input[type='text']:focus,
+	select:focus {
 		outline: none;
 		border-color: #355fb0;
+	}
+
+	.mirror-note {
+		margin: 0;
+		padding: 0.7rem 0.9rem;
+		background: #1f242c;
+		border-left: 3px solid #80a8e6;
+		border-radius: 4px;
+		color: #c5cad3;
+		font-size: 0.88rem;
+		max-width: 640px;
 	}
 
 	.password-row {

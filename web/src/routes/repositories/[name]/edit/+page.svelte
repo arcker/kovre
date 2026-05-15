@@ -6,7 +6,7 @@
 	import { emitConfigYaml, updateRepository, type RepositoryDraft } from '$lib/yaml';
 	import RepoForm from '$lib/RepoForm.svelte';
 
-	const repoName = $derived(page.params.name);
+	const repoName = $derived(page.params.name ?? '');
 
 	let config = $state<ConfigPayload | null>(null);
 	let loading = $state(true);
@@ -14,7 +14,12 @@
 	let busy = $state(false);
 	let submitError = $state<string | null>(null);
 
-	let draft = $state<RepositoryDraft>({ name: '', path: '', password_file: '' });
+	let draft = $state<RepositoryDraft>({
+		name: '',
+		path: '',
+		backend: 'rustic',
+		password_file: ''
+	});
 
 	onMount(async () => {
 		try {
@@ -28,7 +33,8 @@
 			draft = {
 				name: repoName,
 				path: existing.path,
-				password_file: existing.password_file
+				backend: existing.backend ?? 'rustic',
+				password_file: existing.password_file ?? ''
 			};
 		} catch (e) {
 			loadError = e instanceof Error ? e.message : String(e);

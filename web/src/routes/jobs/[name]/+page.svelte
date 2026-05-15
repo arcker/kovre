@@ -16,7 +16,7 @@
 	import { emitConfigYaml, removeJob } from '$lib/yaml';
 	import { formatBytes, formatTime, shortId } from '$lib/format';
 
-	const jobName = $derived(page.params.name);
+	const jobName = $derived(page.params.name ?? '');
 
 	let job = $state<Job | null>(null);
 	let runs = $state<JobRun[]>([]);

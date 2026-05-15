@@ -459,6 +459,195 @@ fn dashboard_end_to_end() {
         post_status(&a, "/api/repositories/ghost/verify");
     assert_eq!(verify_404_status, 404);
     assert_eq!(verify_404_body["error"], "unknown_repository");
+
+    // ---- Phase 4: full mirror backend pipeline via the dashboard API ----
+    // Adds a mirror repo + job through PUT /api/config (live reload),
+    // initializes, runs three backups against a mutating source and
+    // asserts:
+    //   - canonical files land at <repo>/<job>/<basename>/...
+    //   - overwritten files are preserved in .versions/<rel>/<stem>-<ts>.<ext>
+    //   - keep_versions retention prunes once we exceed the budget.
+
+    let workspace_root = fx.workspace.path();
+    let mirror_src = workspace_root.join("mirror_src");
+    let mirror_repo = workspace_root.join("mirror_repo");
+    std::fs::create_dir_all(&mirror_src).unwrap();
+    std::fs::write(mirror_src.join("photo.jpg"), b"v1-photo").unwrap();
+    std::fs::write(mirror_src.join("doc.txt"), b"v1-doc-content").unwrap();
+
+    // Build a fresh YAML carrying everything kovre.yaml already had
+    // plus the mirror repo + photos-mirror job. We rebuild from
+    // scratch rather than patching the in-memory yaml string because
+    // serde_yaml normalizes whitespace on the round-trip and partial
+    // string ops are brittle.
+    let workspace_data_dir = workspace_root.join("data");
+    let rustic_repo = workspace_root.join("repo");
+    let rustic_pwd = workspace_root.join("repo.key");
+    let rustic_src = workspace_root.join("source");
+
+    let full_yaml = format!(
+        concat!(
+            "agent:\n",
+            "  data_dir: {data}\n",
+            "  log_level: warn\n",
+            "repositories:\n",
+            "  test:\n",
+            "    path: {rustic_repo}\n",
+            "    password_file: {rustic_pwd}\n",
+            "  photos:\n",
+            "    path: {mirror_repo}\n",
+            "    backend: mirror\n",
+            "jobs:\n",
+            "  files:\n",
+            "    repository: test\n",
+            "    paths:\n",
+            "      - {rustic_src}\n",
+            "  added_by_test:\n",
+            "    template: documents\n",
+            "    repository: test\n",
+            "  photos-mirror:\n",
+            "    repository: photos\n",
+            "    paths:\n",
+            "      - {mirror_src}\n",
+            "    retention:\n",
+            "      keep_versions: 2\n",
+        ),
+        data = yaml_path(&workspace_data_dir),
+        rustic_repo = yaml_path(&rustic_repo),
+        rustic_pwd = yaml_path(&rustic_pwd),
+        rustic_src = yaml_path(&rustic_src),
+        mirror_repo = yaml_path(&mirror_repo),
+        mirror_src = yaml_path(&mirror_src),
+    );
+
+    let (cfg_status, cfg_body) = put_yaml(&a, "/api/config", &full_yaml);
+    assert_eq!(
+        cfg_status, 200,
+        "PUT /api/config with mirror entry failed: {cfg_body:#}"
+    );
+    assert!(
+        cfg_body["parsed"]["jobs"]["photos-mirror"].is_object(),
+        "expected photos-mirror to be in parsed response: {cfg_body:#}"
+    );
+
+    // mirror verify is a no-op but the route must succeed.
+    let (mverify_status, mverify_body) =
+        post_status(&a, "/api/repositories/photos/verify");
+    assert_eq!(mverify_status, 200);
+    assert_eq!(mverify_body["ok"], true);
+    assert!(
+        mverify_body["messages"]
+            .as_array()
+            .map(|arr| arr.iter().any(|m| m.as_str().unwrap_or("").contains("mirror")))
+            .unwrap_or(false),
+        "mirror verify should mention the backend: {mverify_body:#}"
+    );
+
+    // Init creates the dest root (mkdir -p). Idempotent on mirror.
+    let (minit_status, _) = post_status(&a, "/api/repositories/photos/init");
+    assert_eq!(minit_status, 200, "mirror init should always succeed");
+
+    // --- First run: canonical files land in the mirror.
+    let mirror_canonical = mirror_repo.join("photos-mirror").join("mirror_src");
+    let mirror_versions = mirror_repo.join("photos-mirror").join(".versions");
+
+    let (m_run1_status, m_run1_body) = post_status(&a, "/api/jobs/photos-mirror/run");
+    assert_eq!(m_run1_status, 202, "first mirror run not accepted");
+    let m_run1_id = m_run1_body["id"].as_str().unwrap().to_string();
+    poll_run_until_terminal(&a, &m_run1_id);
+    assert_eq!(
+        std::fs::read(mirror_canonical.join("photo.jpg")).unwrap(),
+        b"v1-photo"
+    );
+    assert_eq!(
+        std::fs::read(mirror_canonical.join("doc.txt")).unwrap(),
+        b"v1-doc-content"
+    );
+    // No archived versions yet — nothing was overwritten.
+    let v1_count = count_files(&mirror_versions);
+    assert_eq!(v1_count, 0, ".versions/ should be empty after first run");
+
+    // --- Second run: modify photo.jpg, doc.txt unchanged.
+    // Sleep ≥1s so the mtime/size delta is observable on filesystems
+    // that round timestamps to the nearest second.
+    thread::sleep(Duration::from_millis(1100));
+    std::fs::write(mirror_src.join("photo.jpg"), b"v2-photo-longer").unwrap();
+
+    let (m_run2_status, m_run2_body) = post_status(&a, "/api/jobs/photos-mirror/run");
+    assert_eq!(m_run2_status, 202);
+    poll_run_until_terminal(&a, m_run2_body["id"].as_str().unwrap());
+
+    assert_eq!(
+        std::fs::read(mirror_canonical.join("photo.jpg")).unwrap(),
+        b"v2-photo-longer",
+        "canonical should hold the new version"
+    );
+    let v2_count = count_files(&mirror_versions);
+    assert_eq!(v2_count, 1, "1 archived version expected after one overwrite");
+
+    // --- Third run: modify photo.jpg again. Now we'd have 2 versions
+    //   in .versions/ → still within keep_versions=2 budget, no prune.
+    thread::sleep(Duration::from_millis(1100));
+    std::fs::write(mirror_src.join("photo.jpg"), b"v3-photo-much-longer").unwrap();
+
+    let (m_run3_status, m_run3_body) = post_status(&a, "/api/jobs/photos-mirror/run");
+    assert_eq!(m_run3_status, 202);
+    poll_run_until_terminal(&a, m_run3_body["id"].as_str().unwrap());
+
+    let v3_count = count_files(&mirror_versions);
+    assert_eq!(
+        v3_count, 2,
+        "2 archived versions expected (within keep_versions=2 budget)"
+    );
+
+    // --- Fourth run: modify photo.jpg once more → would have 3
+    //   archives, retention prunes the oldest → back to 2.
+    thread::sleep(Duration::from_millis(1100));
+    std::fs::write(mirror_src.join("photo.jpg"), b"v4-photo-even-more").unwrap();
+
+    let (m_run4_status, m_run4_body) = post_status(&a, "/api/jobs/photos-mirror/run");
+    assert_eq!(m_run4_status, 202);
+    poll_run_until_terminal(&a, m_run4_body["id"].as_str().unwrap());
+
+    let v4_count = count_files(&mirror_versions);
+    assert_eq!(
+        v4_count, 2,
+        "retention should have pruned the oldest archive (got {v4_count} versions)"
+    );
+}
+
+/// Poll `/api/job_runs/<run_id>` until status is `success` or `failed`.
+/// Panics with the full run body on failure or after a 60s timeout.
+fn poll_run_until_terminal(a: &ureq::Agent, run_id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let single = get_json(a, &format!("/api/job_runs/{run_id}"));
+        let s = single["status"].as_str().unwrap_or("").to_string();
+        if s == "success" {
+            return;
+        }
+        if s == "failed" {
+            panic!("run {run_id} failed: {single:#}");
+        }
+        if Instant::now() >= deadline {
+            panic!("run {run_id} never reached terminal state (last status={s})");
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Count regular files under `root` (recursive). Returns 0 if `root`
+/// doesn't exist, which is the expected state before the first
+/// archive happens.
+fn count_files(root: &Path) -> usize {
+    if !root.exists() {
+        return 0;
+    }
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .count()
 }
 
 /// Minimal URL-encoder for path values (Windows backslash, colon,

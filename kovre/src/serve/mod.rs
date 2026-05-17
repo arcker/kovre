@@ -145,6 +145,19 @@ pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Re
             Ok(handle_list_templates())
         });
 
+        // POST /api/templates/:name/resolve — given template options
+        // as JSON, return the concrete (paths, excludes) the template
+        // would expand to on this machine. Drives the inventory view
+        // (Phase 5) and the wizard's "what will actually be backed
+        // up" preview. Wrapped in spawn_blocking because some
+        // templates hit the filesystem (dev-repos scan) or the
+        // registry (steam-saves).
+        server = server.with_route_async(
+            Method::POST,
+            "/api/templates/*/resolve",
+            |req| async move { Ok(handle_resolve_template(req).await) },
+        );
+
         // GET /api/fs?path=<dir> — list the direct subdirectories of
         // `<dir>`. Backend for the directory autocomplete in the wizard.
         server = server.with_route_async(Method::GET, "/api/fs", |req| async move {
@@ -478,6 +491,160 @@ fn put_config_data(
 /// backed by `GET /api/fs`.
 fn handle_list_templates() -> RouteResponse {
     response::json_value(StatusCode::OK, &list_templates_data())
+}
+
+/// `POST /api/templates/:name/resolve` — expand a template into the
+/// concrete paths/excludes it produces on this machine. Body is
+/// optional JSON `{ "template_options": { ... } }` or just the
+/// options object directly. Empty body = no options.
+async fn handle_resolve_template(req: RouteRequest) -> RouteResponse {
+    use lithair_core::app::request;
+
+    let name = match extract_template_name_for_resolve(req.uri().path()) {
+        Some(n) => n,
+        None => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "could not parse template name from path"}),
+            );
+        }
+    };
+
+    // Options bodies are tiny (a few fields), 16 KiB cap is generous.
+    let bytes = match request::read_body_with_limit(req, 16 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "read_body", "reason": e.to_string()}),
+            );
+        }
+    };
+
+    let opts_json: serde_json::Value = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        match serde_json::from_slice(&bytes) {
+            Ok(v) => unwrap_template_options(v),
+            Err(e) => {
+                return response::json_value(
+                    StatusCode::BAD_REQUEST,
+                    &serde_json::json!({"error": "json_parse", "reason": e.to_string()}),
+                );
+            }
+        }
+    };
+
+    let (status, payload) =
+        tokio::task::spawn_blocking(move || resolve_template_data(&name, &opts_json))
+            .await
+            .unwrap_or_else(|join_err| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({
+                        "error": "resolve_task_panicked",
+                        "reason": join_err.to_string(),
+                    }),
+                )
+            });
+    response::json_value(status, &payload)
+}
+
+/// Accept either `{template_options: {...}}` (mirroring the YAML
+/// shape) or the bare options object directly. Lets the frontend stay
+/// flexible.
+fn unwrap_template_options(v: serde_json::Value) -> serde_json::Value {
+    if let serde_json::Value::Object(ref map) = v {
+        if map.len() == 1 {
+            if let Some(inner) = map.get("template_options") {
+                return inner.clone();
+            }
+        }
+    }
+    v
+}
+
+/// Pure data computation for the resolve handler. Touches the
+/// filesystem (dev-repos scan) / registry (steam-saves) on the
+/// caller thread — the HTTP handler wraps this in spawn_blocking.
+fn resolve_template_data(
+    name: &str,
+    options: &serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    // `custom` is a UI pseudo-template (= "user supplied paths
+    // directly"); rejecting it explicitly avoids a confusing 404.
+    if name == "custom" {
+        return (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "error": "not_a_template",
+                "name": name,
+                "message": "custom is not a resolvable template — its paths/excludes come from the user",
+            }),
+        );
+    }
+
+    // JSON → YAML value round-trip. Both types accept the same JSON-ish
+    // shape (object/array/string/number/bool/null), so a direct
+    // serde::Deserialize works.
+    let yaml_value: serde_yaml::Value = match serde_json::from_value(options.clone()) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "error": "options_format",
+                    "reason": e.to_string(),
+                }),
+            );
+        }
+    };
+
+    match kovre_core::templates::resolve(name, &yaml_value) {
+        Ok(resolved) => {
+            let paths: Vec<String> = resolved
+                .paths
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            let status_label = if paths.is_empty() { "empty" } else { "ok" };
+            (
+                StatusCode::OK,
+                serde_json::json!({
+                    "name": name,
+                    "paths": paths,
+                    "excludes": resolved.excludes,
+                    "status": status_label,
+                }),
+            )
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            let lower = msg.to_lowercase();
+            let status = if lower.contains("unknown template") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (
+                status,
+                serde_json::json!({
+                    "error": "resolve_failed",
+                    "name": name,
+                    "message": msg,
+                }),
+            )
+        }
+    }
+}
+
+fn extract_template_name_for_resolve(path: &str) -> Option<String> {
+    let stripped = path.strip_prefix("/api/templates/")?;
+    let (name, rest) = stripped.split_once('/')?;
+    if rest != "resolve" || name.is_empty() {
+        return None;
+    }
+    Some(query::percent_decode(name))
 }
 
 /// `GET /api/repositories/status` — report whether each repository
@@ -970,6 +1137,92 @@ mod tests {
             names,
             vec!["documents", "dev-repos", "steam-saves", "custom"]
         );
+    }
+
+    // ---- /api/templates/:name/resolve ----
+
+    #[test]
+    fn extract_template_name_for_resolve_handles_simple_name() {
+        assert_eq!(
+            extract_template_name_for_resolve("/api/templates/documents/resolve"),
+            Some("documents".into())
+        );
+    }
+
+    #[test]
+    fn extract_template_name_for_resolve_handles_dash() {
+        assert_eq!(
+            extract_template_name_for_resolve("/api/templates/dev-repos/resolve"),
+            Some("dev-repos".into())
+        );
+    }
+
+    #[test]
+    fn extract_template_name_for_resolve_rejects_wrong_suffix() {
+        assert!(extract_template_name_for_resolve("/api/templates/documents/run").is_none());
+    }
+
+    #[test]
+    fn extract_template_name_for_resolve_rejects_missing_name() {
+        assert!(extract_template_name_for_resolve("/api/templates//resolve").is_none());
+    }
+
+    #[test]
+    fn unwrap_template_options_unwraps_envelope() {
+        let v = serde_json::json!({"template_options": {"scan_root": "D:\\dev"}});
+        let inner = unwrap_template_options(v);
+        assert_eq!(inner, serde_json::json!({"scan_root": "D:\\dev"}));
+    }
+
+    #[test]
+    fn unwrap_template_options_passes_bare_object_through() {
+        let v = serde_json::json!({"scan_root": "D:\\dev"});
+        let unchanged = unwrap_template_options(v.clone());
+        assert_eq!(unchanged, v);
+    }
+
+    #[test]
+    fn resolve_template_data_rejects_custom() {
+        let (status, body) = resolve_template_data("custom", &serde_json::Value::Null);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "not_a_template");
+    }
+
+    #[test]
+    fn resolve_template_data_404s_on_unknown_template() {
+        let (status, body) = resolve_template_data("ghost-template", &serde_json::Value::Null);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "resolve_failed");
+        assert!(body["message"].as_str().unwrap_or("").contains("unknown template"));
+    }
+
+    #[test]
+    fn resolve_template_data_returns_empty_for_dev_repos_with_missing_scan_root() {
+        let opts = serde_json::json!({"scan_root": "C:\\definitely\\does\\not\\exist\\dev"});
+        let (status, body) = resolve_template_data("dev-repos", &opts);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["name"], "dev-repos");
+        assert_eq!(body["status"], "empty");
+        assert!(body["paths"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolve_template_data_returns_ok_for_documents() {
+        // documents resolves via dirs::document_dir() etc. On any
+        // realistic Windows test runner at least one of the three
+        // candidates exists, so we expect "ok" with non-empty paths.
+        // On a headless CI without a user profile this could be
+        // "empty" — accept both, just make sure the shape is right.
+        let (status, body) =
+            resolve_template_data("documents", &serde_json::Value::Null);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["name"], "documents");
+        let status_label = body["status"].as_str().unwrap_or("");
+        assert!(
+            status_label == "ok" || status_label == "empty",
+            "unexpected status label: {status_label}"
+        );
+        assert!(body["excludes"].is_array());
     }
 
     #[test]

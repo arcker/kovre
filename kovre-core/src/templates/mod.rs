@@ -2,13 +2,19 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
+pub mod browser_profiles;
 pub mod dev_repos;
-pub mod documents;
 pub mod steam_saves;
+pub mod thunderbird_mail;
+pub mod user_appdata;
+pub mod user_files;
 
+pub use browser_profiles::BrowserProfilesTemplate;
 pub use dev_repos::DevReposTemplate;
-pub use documents::DocumentsTemplate;
 pub use steam_saves::SteamSavesTemplate;
+pub use thunderbird_mail::ThunderbirdMailTemplate;
+pub use user_appdata::UserAppdataTemplate;
+pub use user_files::UserFilesTemplate;
 
 use crate::config::Job;
 
@@ -25,12 +31,22 @@ pub trait Template {
 
 /// Look up a template by name and resolve it with the given options.
 ///
-/// `options` should be `Value::Null` when the YAML job has no `template_options:` block.
+/// `options` should be `Value::Null` when the YAML job has no
+/// `template_options:` block.
+///
+/// Legacy alias: `"documents"` (the original Phase 1 name) resolves
+/// to [`UserFilesTemplate`] (the Phase 5 expansion that adds
+/// Music/Videos/Downloads/Saved Games to the same set). Existing
+/// `kovre.yaml` files keep working without migration.
 pub fn resolve(name: &str, options: &serde_yaml::Value) -> Result<ResolvedTemplate> {
     let template: Box<dyn Template> = match name {
-        DocumentsTemplate::NAME => Box::new(DocumentsTemplate),
+        // Aliased: keep accepting the old name forever.
+        "documents" | UserFilesTemplate::NAME => Box::new(UserFilesTemplate),
         DevReposTemplate::NAME => Box::new(DevReposTemplate),
         SteamSavesTemplate::NAME => Box::new(SteamSavesTemplate),
+        ThunderbirdMailTemplate::NAME => Box::new(ThunderbirdMailTemplate),
+        BrowserProfilesTemplate::NAME => Box::new(BrowserProfilesTemplate),
+        UserAppdataTemplate::NAME => Box::new(UserAppdataTemplate),
         _ => anyhow::bail!("unknown template `{name}`"),
     };
     template.resolve(options)

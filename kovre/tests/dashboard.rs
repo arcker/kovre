@@ -361,7 +361,10 @@ fn dashboard_end_to_end() {
 
     // ---- Phase 3 read-only API ----
 
-    // GET /api/templates — the four builtin templates, in stable order.
+    // GET /api/templates — the 7 builtin templates, in display order.
+    // Order is enforced because it drives the wizard's gallery layout:
+    // personal-data templates first, dev/games next, safety net + escape
+    // hatch last.
     let templates = get_json(&a, "/api/templates");
     let names: Vec<String> = templates
         .as_array()
@@ -371,7 +374,15 @@ fn dashboard_end_to_end() {
         .collect();
     assert_eq!(
         names,
-        vec!["documents", "dev-repos", "steam-saves", "custom"]
+        vec![
+            "user-files",
+            "thunderbird-mail",
+            "browser-profiles",
+            "dev-repos",
+            "steam-saves",
+            "user-appdata",
+            "custom"
+        ]
     );
 
     // GET /api/fs — the workspace root contains the source/repo/data

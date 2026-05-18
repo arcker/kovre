@@ -941,10 +941,27 @@ fn init_password_data(raw_path: &str) -> (StatusCode, serde_json::Value) {
 fn list_templates_data() -> serde_json::Value {
     serde_json::json!([
         {
-            "name": "documents",
+            "name": "user-files",
             "icon": "📄",
-            "description": "Backup the user's Documents, Desktop and Pictures folders.",
+            "description": "Personal known folders: Documents, Desktop, Pictures, Music, Videos, Downloads, Saved Games.",
             "options": []
+        },
+        {
+            "name": "thunderbird-mail",
+            "icon": "📨",
+            "description": "Every Thunderbird profile under %APPDATA%\\Thunderbird\\Profiles (mail, address book, calendar, prefs).",
+            "options": []
+        },
+        {
+            "name": "browser-profiles",
+            "icon": "🌐",
+            "description": "Bookmarks, history, logins, extensions and preferences for the installed browsers.",
+            "options": [
+                {"key": "firefox", "type": "bool", "label": "Firefox", "required": false},
+                {"key": "chrome", "type": "bool", "label": "Chrome", "required": false},
+                {"key": "edge", "type": "bool", "label": "Edge", "required": false},
+                {"key": "brave", "type": "bool", "label": "Brave", "required": false}
+            ]
         },
         {
             "name": "dev-repos",
@@ -958,6 +975,12 @@ fn list_templates_data() -> serde_json::Value {
             "name": "steam-saves",
             "icon": "🎮",
             "description": "Detect Steam via the registry and back up game save folders matched against the Ludusavi manifest.",
+            "options": []
+        },
+        {
+            "name": "user-appdata",
+            "icon": "🗂️",
+            "description": "Safety net over %APPDATA% (Roaming), excluding cache/temp/logs and anything already covered by more specific templates.",
             "options": []
         },
         {
@@ -1125,7 +1148,7 @@ mod tests {
     }
 
     #[test]
-    fn list_templates_data_returns_the_four_known_templates() {
+    fn list_templates_data_returns_all_known_templates_in_order() {
         let arr = list_templates_data();
         let names: Vec<String> = arr
             .as_array()
@@ -1133,9 +1156,21 @@ mod tests {
             .iter()
             .map(|v| v["name"].as_str().unwrap_or("").to_string())
             .collect();
+        // Order matters: it's the wizard's display order, which
+        // surfaces the most personal-data templates first (user-files,
+        // thunderbird, browsers) and pushes the safety net `user-appdata`
+        // and the escape hatch `custom` to the end.
         assert_eq!(
             names,
-            vec!["documents", "dev-repos", "steam-saves", "custom"]
+            vec![
+                "user-files",
+                "thunderbird-mail",
+                "browser-profiles",
+                "dev-repos",
+                "steam-saves",
+                "user-appdata",
+                "custom"
+            ]
         );
     }
 

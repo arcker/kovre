@@ -78,9 +78,12 @@ export const listJobs = (): Promise<Job[]> => getJson<Job[]>('/api/jobs');
 
 export interface TemplateOption {
 	key: string;
-	type: 'directory' | 'directory_list' | 'string_list';
+	type: 'directory' | 'directory_list' | 'string_list' | 'bool';
 	label: string;
 	required: boolean;
+	/** For typed options: the default the form should pre-fill (e.g.
+	 *  `true` for a bool option). Untyped/missing means no default. */
+	default?: unknown;
 }
 
 export interface Template {

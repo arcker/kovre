@@ -957,10 +957,10 @@ fn list_templates_data() -> serde_json::Value {
             "icon": "🌐",
             "description": "Bookmarks, history, logins, extensions and preferences for the installed browsers.",
             "options": [
-                {"key": "firefox", "type": "bool", "label": "Firefox", "required": false},
-                {"key": "chrome", "type": "bool", "label": "Chrome", "required": false},
-                {"key": "edge", "type": "bool", "label": "Edge", "required": false},
-                {"key": "brave", "type": "bool", "label": "Brave", "required": false}
+                {"key": "firefox", "type": "bool", "label": "Firefox", "required": false, "default": true},
+                {"key": "chrome",  "type": "bool", "label": "Chrome",  "required": false, "default": true},
+                {"key": "edge",    "type": "bool", "label": "Edge",    "required": false, "default": true},
+                {"key": "brave",   "type": "bool", "label": "Brave",   "required": false, "default": false}
             ]
         },
         {

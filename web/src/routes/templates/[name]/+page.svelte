@@ -49,10 +49,17 @@
 			jobName = candidate;
 			// Default to the first repository declared.
 			repository = Object.keys(cfg.parsed.repositories ?? {})[0] ?? '';
-			// Initialize option values.
+			// Initialize option values. Bool options take their server-
+			// declared default; list options start with one empty row;
+			// scalar inputs start empty.
 			for (const opt of template?.options ?? []) {
-				optionValues[opt.key] =
-					opt.type === 'directory_list' || opt.type === 'string_list' ? [''] : '';
+				if (opt.type === 'bool') {
+					optionValues[opt.key] = typeof opt.default === 'boolean' ? opt.default : false;
+				} else if (opt.type === 'directory_list' || opt.type === 'string_list') {
+					optionValues[opt.key] = [''];
+				} else {
+					optionValues[opt.key] = '';
+				}
 			}
 		} catch (e) {
 			loadError = e instanceof Error ? e.message : String(e);
@@ -97,7 +104,14 @@
 			const opts: Record<string, unknown> = {};
 			for (const opt of template?.options ?? []) {
 				const v = optionValues[opt.key];
-				if (v != null && v !== '') opts[opt.key] = v;
+				if (opt.type === 'bool') {
+					// Always emit bools so a user-flipped toggle is persisted,
+					// even if it matches the template's default. The server is
+					// happy with redundant keys.
+					if (typeof v === 'boolean') opts[opt.key] = v;
+				} else if (v != null && v !== '') {
+					opts[opt.key] = v;
+				}
 			}
 			if (Object.keys(opts).length > 0) draft.template_options = opts;
 		}
@@ -181,10 +195,23 @@
 		</label>
 
 		{#each template.options as opt (opt.key)}
-			<fieldset>
+			<fieldset class:fieldset-inline={opt.type === 'bool'}>
 				<legend>{opt.label}{opt.required ? ' *' : ''}</legend>
 
-				{#if opt.type === 'directory'}
+				{#if opt.type === 'bool'}
+					<label class="toggle">
+						<input
+							type="checkbox"
+							checked={optionValues[opt.key] === true}
+							onchange={(e) =>
+								(optionValues[opt.key] = (e.target as HTMLInputElement).checked)}
+						/>
+						<span class="toggle-label">
+							{optionValues[opt.key] === true ? 'enabled' : 'disabled'}
+						</span>
+					</label>
+
+				{:else if opt.type === 'directory'}
 					<DirInput bind:value={optionValues[opt.key] as string} placeholder="C:\..." />
 
 				{:else if opt.type === 'directory_list'}
@@ -334,10 +361,32 @@
 		border-radius: 5px;
 		padding: 1rem 1.1rem 1rem;
 	}
+	.fieldset-inline {
+		padding: 0.55rem 1.1rem 0.7rem;
+	}
 	legend {
 		padding: 0 0.5rem;
 		color: #9aa3b2;
 		font-size: 0.85rem;
+	}
+
+	.toggle {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		gap: 0.55rem;
+		cursor: pointer;
+		user-select: none;
+	}
+	.toggle input[type='checkbox'] {
+		width: 1.1rem;
+		height: 1.1rem;
+		accent-color: #355fb0;
+		cursor: pointer;
+	}
+	.toggle-label {
+		color: #c5cad3;
+		font-size: 0.88rem;
 	}
 
 	.row {

@@ -72,10 +72,20 @@
 				template = tmpls.find((t) => t.name === existing.template) ?? null;
 				const opts = (existing.template_options ?? {}) as Record<string, unknown>;
 				for (const o of template?.options ?? []) {
-					optionValues[o.key] =
-						o.type === 'directory_list' || o.type === 'string_list'
-							? Array.isArray(opts[o.key]) ? (opts[o.key] as string[]).slice() : ['']
-							: (opts[o.key] ?? '');
+					if (o.type === 'bool') {
+						optionValues[o.key] =
+							typeof opts[o.key] === 'boolean'
+								? (opts[o.key] as boolean)
+								: typeof o.default === 'boolean'
+									? (o.default as boolean)
+									: false;
+					} else if (o.type === 'directory_list' || o.type === 'string_list') {
+						optionValues[o.key] = Array.isArray(opts[o.key])
+							? (opts[o.key] as string[]).slice()
+							: [''];
+					} else {
+						optionValues[o.key] = opts[o.key] ?? '';
+					}
 				}
 			} else {
 				// Custom job — use the special "custom" pseudo-template.
@@ -130,7 +140,11 @@
 			const opts: Record<string, unknown> = {};
 			for (const opt of template?.options ?? []) {
 				const v = optionValues[opt.key];
-				if (v != null && v !== '') opts[opt.key] = v;
+				if (opt.type === 'bool') {
+					if (typeof v === 'boolean') opts[opt.key] = v;
+				} else if (v != null && v !== '') {
+					opts[opt.key] = v;
+				}
 			}
 			if (Object.keys(opts).length > 0) draft.template_options = opts;
 		}
@@ -250,9 +264,21 @@
 			</fieldset>
 		{:else if template}
 			{#each template.options as opt (opt.key)}
-				<fieldset>
+				<fieldset class:fieldset-inline={opt.type === 'bool'}>
 					<legend>{opt.label}{opt.required ? ' *' : ''}</legend>
-					{#if opt.type === 'directory'}
+					{#if opt.type === 'bool'}
+						<label class="toggle">
+							<input
+								type="checkbox"
+								checked={optionValues[opt.key] === true}
+								onchange={(e) =>
+									(optionValues[opt.key] = (e.target as HTMLInputElement).checked)}
+							/>
+							<span class="toggle-label">
+								{optionValues[opt.key] === true ? 'enabled' : 'disabled'}
+							</span>
+						</label>
+					{:else if opt.type === 'directory'}
 						<DirInput bind:value={optionValues[opt.key] as string} placeholder="C:\..." />
 					{/if}
 				</fieldset>
@@ -365,10 +391,32 @@
 		border-radius: 5px;
 		padding: 1rem 1.1rem 1rem;
 	}
+	.fieldset-inline {
+		padding: 0.55rem 1.1rem 0.7rem;
+	}
 	legend {
 		padding: 0 0.5rem;
 		color: #9aa3b2;
 		font-size: 0.85rem;
+	}
+
+	.toggle {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		gap: 0.55rem;
+		cursor: pointer;
+		user-select: none;
+	}
+	.toggle input[type='checkbox'] {
+		width: 1.1rem;
+		height: 1.1rem;
+		accent-color: #355fb0;
+		cursor: pointer;
+	}
+	.toggle-label {
+		color: #c5cad3;
+		font-size: 0.88rem;
 	}
 
 	.row {

@@ -2101,6 +2101,7 @@ dependencies = [
  "rustic_core",
  "serde",
  "serde_yaml",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",

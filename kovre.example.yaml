@@ -6,34 +6,57 @@ agent:
   log_level: info
 
 repositories:
+  # Backend recommandé pour photos / documents / mails / jeux :
+  # fichiers natifs sur le NAS, browsables depuis Explorer.
   nas:
     path: \\nas.local\backup\kovre
-    password_file: C:\ProgramData\Kovre\nas.key
+    backend: mirror
+
+  # Backend rustic : encrypted + dedup. Pour dev trees, logs, dumps.
+  dev-archive:
+    path: \\nas.local\backup\kovre-rustic
+    backend: rustic
+    password_file: C:\ProgramData\Kovre\dev.key
 
 jobs:
-  documents:
-    template: documents
+  # Documents, Desktop, Pictures, Music, Videos, Downloads, Saved Games.
+  user-files:
+    template: user-files
     repository: nas
     retention:
-      keep_daily: 7
-      keep_weekly: 4
-      keep_monthly: 12
+      keep_versions: 5
 
-  dev:
-    template: dev-repos
+  # Tous les profils Thunderbird sous %APPDATA%\Thunderbird\Profiles.
+  mail:
+    template: thunderbird-mail
     repository: nas
+    retention:
+      keep_versions: 3
+
+  # Bookmarks / History / Logins / Extensions des navigateurs installés.
+  browsers:
+    template: browser-profiles
+    repository: nas
+    retention:
+      keep_versions: 3
+
+  # Saves de jeux Steam, détectées via le manifest Ludusavi.
+  steam:
+    template: steam-saves
+    repository: nas
+    retention:
+      keep_versions: 5
+
+  # Dev repositories — typiquement vers le repo rustic (dedup paie).
+  code:
+    template: dev-repos
+    repository: dev-archive
     template_options:
       scan_root: D:\dev
     retention:
       keep_last: 30
 
-  steam:
-    template: steam-saves
-    repository: nas
-    retention:
-      keep_last: 10
-
-  # Job sans template — paths/excludes explicites
+  # Job sans template — paths/excludes explicites.
   custom-photos:
     repository: nas
     paths:
@@ -41,4 +64,4 @@ jobs:
     excludes:
       - "**/*.tmp"
     retention:
-      keep_last: 50
+      keep_versions: 10

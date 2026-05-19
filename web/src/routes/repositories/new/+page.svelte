@@ -14,7 +14,7 @@
 	let draft = $state<RepositoryDraft>({
 		name: '',
 		path: '',
-		backend: 'rustic',
+		backend: 'mirror',
 		password_file: ''
 	});
 

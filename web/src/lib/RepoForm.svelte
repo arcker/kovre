@@ -96,16 +96,18 @@
 	<label>
 		<span class="label">Backend</span>
 		<select bind:value={draft.backend}>
-			<option value="rustic">rustic — deduplicated, encrypted (recommended for offsite/dev)</option>
-			<option value="mirror">mirror — plain files + .versions/ (browsable, no passphrase)</option>
+			<option value="mirror">mirror — plain files + .versions/ (browsable, no passphrase) — recommended</option>
+			<option value="rustic">rustic — deduplicated, encrypted (for dev/logs/dumps)</option>
 		</select>
 		<span class="hint">
-			<strong>rustic</strong> is restic-compatible: encrypted, deduplicated, snapshot-based. Best for
-			anything you can't read in plain Explorer (logs, dev trees, dumps). Requires a password file.
+			<strong>mirror</strong> is the default: files are written 1:1 to the destination so you can
+			browse them straight from Explorer; overwritten and deleted files move to a sibling
+			<code>.versions/</code> folder. Best for photos, documents, mails, game saves — everything
+			you'll want to recover by hand one day.
 			<br />
-			<strong>mirror</strong> writes files 1:1 to the destination; overwritten and deleted files
-			move to a sibling <code>.versions/</code> folder. Best for photos, documents, anything you
-			want to browse straight from Windows Explorer. No passphrase, no encryption.
+			<strong>rustic</strong> is restic-compatible: encrypted, deduplicated, snapshot-based.
+			Worth it for dev trees, log archives, database dumps — places where dedup pays off and you
+			don't need plain-Explorer access. Requires a password file.
 		</span>
 	</label>
 

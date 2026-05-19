@@ -70,20 +70,20 @@ Voir `kovre.example.yaml` pour un exemple complet avec les trois templates built
 
 Le `password_file` doit exister avant le premier `init-repo` ; il contient la passphrase du dépôt rustic en clair (un mot par ligne, retours à la ligne ignorés). Sécuriser les ACL Windows en conséquence.
 
-## Backends (Phase 4)
+## Backends
 
-Chaque `repositories.<name>` a un `backend:` qui choisit comment les fichiers sont stockés :
+Chaque `repositories.<name>` a un `backend:` qui choisit comment les fichiers sont stockés. **mirror est le backend recommandé** pour ce qui est l'âme de kovre (photos, documents, mails, jeux) — c'est-à-dire des fichiers que l'utilisateur voudra retrouver tels quels un jour. `rustic` reste disponible pour les cas où la dédup et l'historique snapshot apportent de la valeur (dev trees, log archives, database dumps).
 
 ```yaml
 repositories:
-  nas:                          # backend rustic (défaut, peut être omis)
-    path: \\nas.local\backup\kovre
-    password_file: C:\ProgramData\Kovre\nas.key
-
-  photos:
+  photos:                       # backend mirror (recommandé)
     path: \\nas.local\photos-mirror
-    backend: mirror             # nouveau Phase 4
-    # password_file omis : mirror n'a pas de passphrase
+    backend: mirror
+
+  dev:                          # backend rustic
+    path: \\nas.local\backup\kovre
+    backend: rustic
+    password_file: C:\ProgramData\Kovre\dev.key
 
 jobs:
   family-photos:
@@ -92,18 +92,28 @@ jobs:
       - D:\Pictures
     retention:
       keep_versions: 5          # spécifique mirror
+
+  code:
+    repository: dev
+    template: dev-repos
+    template_options:
+      scan_root: D:\dev
+    retention:
+      keep_daily: 7              # spécifique rustic
 ```
 
 | Backend | Format | Cible | Restore | Verify |
 |---|---|---|---|---|
-| **rustic** (défaut) | restic-compatible : encrypted, dédupliqué, snapshots immutables | logs, dev trees, dumps, tout ce qui n'a pas besoin d'être browsable en plain | via `kovre` (Phase 4) ou CLI `rustic` standard | `repository.check()` (metadata + index) |
-| **mirror** | fichiers natifs 1:1 sous `<repo>/<job>/<basename>/`, versions archivées dans `<repo>/<job>/.versions/<rel>/<stem>-<ts>.<ext>` | photos, documents, sauvegardes de jeux — tout ce qu'on veut pouvoir browser/copier direct depuis Explorer | `cp` direct depuis la destination | no-op (fichiers natifs, l'OS garantit la lisibilité) |
+| **mirror** (recommandé) | fichiers natifs 1:1 sous `<repo>/<job>/<basename>/`, versions archivées dans `<repo>/<job>/.versions/<rel>/<stem>-<ts>.<ext>` | photos, documents, mails (Thunderbird), profils navigateurs, sauvegardes de jeux — tout ce qu'on veut pouvoir browser/copier direct depuis Explorer | `cp` direct depuis la destination, ou `restore_latest` côté kovre | no-op (fichiers natifs, l'OS garantit la lisibilité) |
+| **rustic** | restic-compatible : encrypted, dédupliqué, snapshots immutables | dev trees, log archives, database dumps — tout ce qui profite de la dédup et n'a pas besoin d'être browsable en plain | `restore_latest` côté kovre ou CLI `rustic` standard | `repository.check()` (metadata + index) |
 
-Détection de changement côté mirror : `mtime + size`. Faux positif acceptable (un fichier touché mais identique sera archivé une fois pour rien). `.versions/` est un nom réservé — un dossier source qui contient `.versions/` à la racine est refusé pour éviter l'auto-collision.
+> **Compat YAML** : si `backend:` est omis, on garde la valeur historique `rustic` pour ne pas casser les configs antérieures à Phase 4. Le wizard du dashboard, en revanche, propose `mirror` en premier.
+
+Détection de changement côté mirror : `mtime + size`, avec un **second passage par hash SHA-256** pour reconnaître les renames (un fichier déplacé dans un sous-dossier ne fait pas exploser `.versions/`). Les fichiers de plus de 512 MiB sautent le hash (re-lire un MKV de 4K pour économiser une copie est une mauvaise affaire). `.versions/` est un nom réservé — un dossier source qui contient `.versions/` à la racine est refusé pour éviter l'auto-collision.
 
 Retention :
-- **rustic** : `keep_last`, `keep_hourly`, `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_yearly` (sur les snapshots).
 - **mirror** : `keep_versions` (par fichier canonique dans `.versions/`).
+- **rustic** : `keep_last`, `keep_hourly`, `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_yearly` (sur les snapshots).
 
 ## Restore (Phase 4)
 

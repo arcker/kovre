@@ -185,6 +185,35 @@ export async function initRepository(
 
 export const getConfig = (): Promise<ConfigPayload> => getJson<ConfigPayload>('/api/config');
 
+export interface ResolvedTemplate {
+	name: string;
+	paths: string[];
+	excludes: string[];
+	status: 'ok' | 'empty' | string;
+}
+
+/** Ask the server to expand a template into concrete paths/excludes
+ *  on this machine. Used by the inventory view to show "what's
+ *  actually being backed up" per job. Treats 400 (`custom` is not a
+ *  template) as a soft failure rather than throwing. */
+export async function resolveTemplate(
+	name: string,
+	options: Record<string, unknown> | null = null
+): Promise<ResolvedTemplate | null> {
+	const resp = await fetch(`/api/templates/${encodeURIComponent(name)}/resolve`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(options ?? {})
+	});
+	if (resp.status === 400 || resp.status === 404) {
+		return null; // `custom` pseudo-template or unknown name
+	}
+	if (!resp.ok) {
+		throw new Error(`POST /api/templates/${name}/resolve → HTTP ${resp.status}`);
+	}
+	return resp.json();
+}
+
 export interface VerifyOutcome {
 	ok: boolean;
 	messages: string[];

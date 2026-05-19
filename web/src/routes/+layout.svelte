@@ -28,7 +28,8 @@
 <header>
 	<h1>kovre</h1>
 	<nav>
-		<a href="/">overview</a>
+		<a href="/">inventory</a>
+		<a href="/jobs">jobs</a>
 		<a href="/runs">runs</a>
 		<a href="/templates">+ add job</a>
 		<a href="/repositories">repositories</a>
@@ -120,7 +121,7 @@
 
 	main {
 		padding: 2rem;
-		max-width: 1200px;
+		max-width: 1800px;
 		margin: 0 auto;
 	}
 </style>

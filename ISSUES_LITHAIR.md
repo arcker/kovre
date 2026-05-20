@@ -29,7 +29,7 @@ Aucun workaround dans kovre — on a attendu le release.
 
 **Phase 3 step:** 2 (les 3 endpoints read-only)
 **Détecté contre :** `lithair-core = "0.2.0"`
-**Statut :** ouverte, en attente upstream
+**Statut :** ✅ fixé dans `lithair-core = "0.3.0"` (`response::json_value(status, &value)`).
 
 `lithair_core::app::response::json(status, body)` prend `impl Into<String>`. Construire des bodies via `serde_json::json!` (le pattern naturel) oblige à `.to_string()` à chaque call site — boilerplate + risque de passer une string non-JSON par accident (le helper met `Content-Type: application/json` quoi qu'il arrive).
 
@@ -39,7 +39,7 @@ Aucun workaround dans kovre — on a attendu le release.
 
 **Phase 3 step:** 2 (`GET /api/fs?path=<dir>`)
 **Détecté contre :** `lithair-core = "0.2.0"`
-**Statut :** ouverte, en attente upstream
+**Statut :** ✅ fixé dans `lithair-core = "0.3.0"` (`query::param`, `query::percent_decode`).
 
 Lithair expose `query::parse_query_params` qui parse une query string en `QueryParams` (skip/take/sort/filters). Pour un endpoint qui veut juste *un* paramètre décodé (ex: `path` dans `/api/fs?path=<dir>`), c'est overkill et sémantiquement faux : tout ce qui n'est pas réservé tombe dans `filters` avec un `FilterOp` parsé, donc `path=>foo` serait interprété comme un `Gt` au lieu du littéral.
 
@@ -49,7 +49,7 @@ Lithair expose `query::parse_query_params` qui parse une query string en `QueryP
 
 **Phase 3 step:** 2 (refactor post v0.3.0)
 **Détecté contre :** `lithair-core = "0.3.0"`
-**Statut :** ouverte, en attente upstream
+**Statut :** ✅ fixé dans `lithair-core = "0.4.0"` (`with_route_async`, `RouteRequest`/`RouteResponse`/`Method`/`StatusCode` re-exportés).
 
 `LithairServerBuilder::with_route` exige une closure `Fn(hyper::Request<Incoming>) -> Pin<Box<dyn Future<Output = Result<hyper::Response<Full<Bytes>>>> + Send>>`. Conséquence : tout consumer doit ajouter `bytes`, `http`, `http-body-util`, `hyper` à son `Cargo.toml` juste pour typer ses handlers, plus écrire `Box::pin(async move { ... })` à chaque appel.
 
@@ -59,7 +59,7 @@ Lithair expose `query::parse_query_params` qui parse une query string en `QueryP
 
 **Phase 3 step:** 2 (refactor post v0.4.0)
 **Détecté contre :** `lithair-core = "0.4.0"`
-**Statut :** ouverte, en attente upstream
+**Statut :** ✅ fixé dans `lithair-core = "0.5.0"` (`response::builder().status().header().body()`, `with_not_found_handler_async`).
 
 Deux gaps cosmétiques restants après le refactor v0.4.0 :
 
@@ -72,7 +72,7 @@ Deux gaps cosmétiques restants après le refactor v0.4.0 :
 
 **Phase 3 step:** 3 (`PUT /api/config`)
 **Détecté contre :** `lithair-core = "0.5.0"`
-**Statut :** ouverte, en attente upstream
+**Statut :** ✅ fixé dans `lithair-core = "0.6.0"` (`request::read_body`, `read_body_with_limit`, `read_body_as_string`, `read_body_json::<T>`).
 
 Pour lire le body d'une `RouteRequest` (ex: le YAML du PUT /api/config), il faut `http_body_util::BodyExt::collect()` — donc ré-ajouter `http-body-util` + `bytes` à kovre/Cargo.toml, exactement les deps qu'on vient de droper en v0.5.0. Aucun helper équivalent à `response::builder()` côté request dans la surface publique de Lithair.
 

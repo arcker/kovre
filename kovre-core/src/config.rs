@@ -190,32 +190,44 @@ mod tests {
         assert_eq!(cfg.agent.data_dir, PathBuf::from(r"C:\ProgramData\Kovre"));
         assert_eq!(cfg.agent.log_level, "info");
 
-        assert_eq!(cfg.repositories.len(), 1);
+        // Two repos: a mirror NAS (the recommended path) and a rustic
+        // archive (for dev trees / logs / dumps).
+        assert_eq!(cfg.repositories.len(), 2);
         let nas = cfg.repositories.get("nas").unwrap();
         assert_eq!(nas.path, PathBuf::from(r"\\nas.local\backup\kovre"));
+        assert_eq!(nas.backend, BackendKind::Mirror);
+        assert!(nas.password_file.is_none(), "mirror has no passphrase");
+
+        let dev_archive = cfg.repositories.get("dev-archive").unwrap();
+        assert_eq!(dev_archive.backend, BackendKind::Rustic);
         assert_eq!(
-            nas.password_file,
-            Some(PathBuf::from(r"C:\ProgramData\Kovre\nas.key"))
+            dev_archive.password_file,
+            Some(PathBuf::from(r"C:\ProgramData\Kovre\dev.key"))
         );
 
-        assert_eq!(cfg.jobs.len(), 4);
-
+        // Six jobs in YAML order. Order matters for the inventory
+        // view's "first defined first shown" layout.
         let order: Vec<&String> = cfg.jobs.keys().collect();
-        assert_eq!(order, vec!["documents", "dev", "steam", "custom-photos"]);
+        assert_eq!(
+            order,
+            vec!["user-files", "mail", "browsers", "steam", "code", "custom-photos"]
+        );
 
-        let documents = cfg.jobs.get("documents").unwrap();
-        assert_eq!(documents.template.as_deref(), Some("documents"));
-        assert_eq!(documents.repository, "nas");
-        let ret = documents.retention.as_ref().unwrap();
-        assert_eq!(ret.keep_daily, Some(7));
-        assert_eq!(ret.keep_weekly, Some(4));
-        assert_eq!(ret.keep_monthly, Some(12));
+        let user_files = cfg.jobs.get("user-files").unwrap();
+        assert_eq!(user_files.template.as_deref(), Some("user-files"));
+        assert_eq!(user_files.repository, "nas");
+        assert_eq!(
+            user_files.retention.as_ref().unwrap().keep_versions,
+            Some(5)
+        );
 
-        let dev = cfg.jobs.get("dev").unwrap();
-        assert_eq!(dev.template.as_deref(), Some("dev-repos"));
-        let opts = dev.template_options.as_ref().unwrap();
+        let code = cfg.jobs.get("code").unwrap();
+        assert_eq!(code.template.as_deref(), Some("dev-repos"));
+        assert_eq!(code.repository, "dev-archive");
+        let opts = code.template_options.as_ref().unwrap();
         let scan_root = opts.get("scan_root").unwrap().as_str().unwrap();
         assert_eq!(scan_root, r"D:\dev");
+        assert_eq!(code.retention.as_ref().unwrap().keep_last, Some(30));
 
         let custom = cfg.jobs.get("custom-photos").unwrap();
         assert!(custom.template.is_none());
@@ -226,6 +238,10 @@ mod tests {
         assert_eq!(
             custom.excludes.as_ref().unwrap(),
             &vec!["**/*.tmp".to_string()]
+        );
+        assert_eq!(
+            custom.retention.as_ref().unwrap().keep_versions,
+            Some(10)
         );
     }
 

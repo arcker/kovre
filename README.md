@@ -233,12 +233,13 @@ robocopy C:\Users\<you>\Documents C:\restore-test\Documents /L /MIR /NJH /NJS
 
 ## Tests
 
-Le workspace tourne 117 tests (Phase 1+2+3+4) :
+Le workspace tourne plusieurs suites (Phase 1 → 5) — count exact via `cargo test --workspace --exclude kovre-wasm 2>&1 | rg "test result"`.
 
 ```sh
-cargo test                                            # 117 tests, ~4-5 min sur Windows
+cargo test                                            # toutes les suites, ~5 min sur Windows
 cargo test --test dashboard                           # le e2e du dashboard seul (~80 s)
-cargo test --test integration                         # les tests Phase 1+4 (~3 min, inclut restore_round_trip)
+cargo test --test integration                         # les tests Phase 1+4 (inclut restore_round_trip)
+cargo test -p kovre-core --lib backup::mirror         # juste les unit tests du moteur mirror (rapide)
 cargo test -p kovre-wasm                              # logique de tri WASM (instantané)
 ```
 

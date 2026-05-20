@@ -1487,7 +1487,7 @@ mod tests {
 
     #[test]
     fn put_config_round_trip_via_get_config() {
-        let (dir, cfg_path, swap) = put_config_fixture();
+        let (_dir, cfg_path, swap) = put_config_fixture();
 
         // Round-trip: read the current in-memory YAML via the GET helper,
         // PUT it back, then re-GET. Should arrive at the same content.

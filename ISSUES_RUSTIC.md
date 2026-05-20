@@ -2,13 +2,13 @@
 
 Notes prises au fil de la Phase 1, désormais reportées en upstream :
 
-| # | Titre court | Upstream |
-|---|-------------|----------|
-| 1 | README outdated (pre-0.11 API) | [rustic-rs/rustic_core#502](https://github.com/rustic-rs/rustic_core/issues/502) |
-| 2 | `excludes.globs` whitelist footgun | [rustic-rs/rustic_core#503](https://github.com/rustic-rs/rustic_core/issues/503) |
-| 3 | `PathList::sanitize` fail-all-or-nothing | [rustic-rs/rustic_core#504](https://github.com/rustic-rs/rustic_core/issues/504) |
-| 4 | `SnapshotFile::time` RFC 9557 suffix | [rustic-rs/rustic_core#505](https://github.com/rustic-rs/rustic_core/issues/505) |
-| 5 | `jiff::Zoned` leaked dependency | [rustic-rs/rustic_core#506](https://github.com/rustic-rs/rustic_core/issues/506) |
+| # | Titre court | Upstream | Statut |
+|---|-------------|----------|--------|
+| 1 | README outdated (pre-0.11 API) | [rustic-rs/rustic_core#502](https://github.com/rustic-rs/rustic_core/issues/502) | 🕓 ouverte upstream (doc) |
+| 2 | `excludes.globs` whitelist footgun | [rustic-rs/rustic_core#503](https://github.com/rustic-rs/rustic_core/issues/503) | 🕓 ouverte upstream — workaround `!`-prefix dans `RusticEngine::backup` |
+| 3 | `PathList::sanitize` fail-all-or-nothing | [rustic-rs/rustic_core#504](https://github.com/rustic-rs/rustic_core/issues/504) | 🕓 ouverte upstream — workaround pré-filtre `p.exists()` |
+| 4 | `SnapshotFile::time` RFC 9557 suffix | [rustic-rs/rustic_core#505](https://github.com/rustic-rs/rustic_core/issues/505) | 🕓 ouverte upstream (cosmétique) |
+| 5 | `jiff::Zoned` leaked dependency | [rustic-rs/rustic_core#506](https://github.com/rustic-rs/rustic_core/issues/506) | 🕓 ouverte upstream — `cargo add jiff` côté kovre |
 
 Versions utilisées :
 - `rustic_core = "0.11.0"`

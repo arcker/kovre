@@ -9,6 +9,7 @@
 
 pub mod frontend;
 pub mod models;
+pub mod restore;
 pub mod runs;
 pub mod sync;
 
@@ -30,7 +31,7 @@ use tracing::info;
 pub type ConfigHandle = Arc<ArcSwap<Config>>;
 
 use crate::cli::ServeArgs;
-use crate::serve::models::{JobRun, Snapshot};
+use crate::serve::models::{JobRun, RestoreRun, Snapshot};
 use crate::serve::runs::{trigger_job_run, TriggerError};
 use crate::serve::sync::sync_snapshots;
 
@@ -52,6 +53,8 @@ pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Re
     let lithair_dir = cfg.agent.data_dir.join("lithair");
     let job_runs_path = lithair_dir.join("job_runs");
     let job_runs_path_str = job_runs_path.to_string_lossy().to_string();
+    let restore_runs_path = lithair_dir.join("restore_runs");
+    let restore_runs_path_str = restore_runs_path.to_string_lossy().to_string();
     let snapshots_path = lithair_dir.join("snapshots");
     let snapshots_path_str = snapshots_path.to_string_lossy().to_string();
     let cfg_arc: ConfigHandle = Arc::new(ArcSwap::from_pointee(cfg.clone()));
@@ -73,6 +76,11 @@ pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Re
                 .await
                 .map_err(|e| anyhow::anyhow!("initializing JobRun event store: {e}"))?,
         );
+        let restore_runs: Arc<DeclarativeHttpHandler<RestoreRun>> = Arc::new(
+            DeclarativeHttpHandler::<RestoreRun>::new_with_replay(&restore_runs_path_str)
+                .await
+                .map_err(|e| anyhow::anyhow!("initializing RestoreRun event store: {e}"))?,
+        );
         let snapshots: Arc<DeclarativeHttpHandler<Snapshot>> = Arc::new(
             DeclarativeHttpHandler::<Snapshot>::new_with_replay(&snapshots_path_str)
                 .await
@@ -85,10 +93,15 @@ pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Re
         let synced = sync_snapshots(&snapshots, &initial_cfg).await;
         info!(snapshots = synced, "initial snapshot sync completed");
 
+        // /api/job_runs[/:id], /api/restore_runs[/:id], /api/snapshots[/:id]
+        // are wired by Lithair via with_handler — auto-generated CRUD.
+        // The trigger routes (POST /api/jobs/:name/run, POST
+        // /api/jobs/:name/restore) live below as custom routes.
         let mut server = LithairServer::new()
             .with_host(args.bind.to_string())
             .with_port(args.port)
             .with_handler(Arc::clone(&job_runs), "/api/job_runs")
+            .with_handler(Arc::clone(&restore_runs), "/api/restore_runs")
             .with_handler(Arc::clone(&snapshots), "/api/snapshots");
 
         // POST /api/jobs/:name/run — see `serve::runs::trigger_job_run`.

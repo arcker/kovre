@@ -70,6 +70,56 @@ pub struct JobRun {
     pub trigger: String,
 }
 
+/// One execution of a restore — the inverse of `JobRun`. Same shape
+/// modulo the fields that don't apply (no snapshot produced, no
+/// bytes_added: a restore doesn't grow the repository). Carries
+/// `dest_dir` so the dashboard can show "where did this go?" in the
+/// run history.
+///
+/// At most one restore can be `running` per `(job_name, dest_dir)`
+/// pair — `register_restore_run` enforces that to prevent two
+/// concurrent restores stomping on the same destination.
+#[derive(Debug, Clone, Serialize, Deserialize, DeclarativeModel)]
+pub struct RestoreRun {
+    /// UUID v4, formatted as a hyphenated lowercase string.
+    #[http(expose)]
+    #[lifecycle(immutable)]
+    #[db(unique)]
+    pub id: String,
+
+    /// Name of the job whose backed-up content is being restored.
+    #[http(expose)]
+    #[lifecycle(immutable)]
+    pub job_name: String,
+
+    /// Destination directory the restore writes into.
+    #[http(expose)]
+    #[lifecycle(immutable)]
+    pub dest_dir: String,
+
+    /// RFC 3339 timestamp of the moment the run started.
+    #[http(expose)]
+    #[lifecycle(immutable)]
+    pub started_at: String,
+
+    /// RFC 3339 timestamp; `None` while the run is still in `running` state.
+    #[http(expose)]
+    pub finished_at: Option<String>,
+
+    /// One of `"running"`, `"success"`, `"failed"`.
+    #[http(expose)]
+    pub status: String,
+
+    /// Human-readable reason; only set when `status == "failed"`.
+    #[http(expose)]
+    pub failure_reason: Option<String>,
+
+    /// One of `"cli"`, `"dashboard"`.
+    #[http(expose)]
+    #[lifecycle(immutable)]
+    pub trigger: String,
+}
+
 /// Cached projection of a rustic snapshot, refreshed at server startup
 /// and on demand by the sync layer (`serve::sync`).
 ///
@@ -170,6 +220,41 @@ mod tests {
         assert!(
             err.to_lowercase().contains("unique") || err.to_lowercase().contains("exists"),
             "unexpected error message: {err}"
+        );
+    }
+
+    fn sample_restore(id: &str) -> RestoreRun {
+        RestoreRun {
+            id: id.into(),
+            job_name: "documents".into(),
+            dest_dir: r"C:\Users\me\kovre-restore\documents\2026-05-20".into(),
+            started_at: "2026-05-20T08:00:00Z".into(),
+            finished_at: None,
+            status: "running".into(),
+            failure_reason: None,
+            trigger: "dashboard".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_run_create_and_get_round_trip() {
+        let h = TestHandler::<RestoreRun>::new().await.unwrap();
+        let run = sample_restore("11111111-1111-4111-8111-aaaaaaaaaaaa");
+        h.create(run.clone()).await.unwrap();
+        let got = h.get(&run.id).await.expect("get returned None");
+        assert_eq!(got.dest_dir, run.dest_dir);
+        assert_eq!(got.status, "running");
+        assert!(got.finished_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn restore_run_duplicate_id_is_rejected() {
+        let h = TestHandler::<RestoreRun>::new().await.unwrap();
+        let run = sample_restore("22222222-2222-4222-8222-bbbbbbbbbbbb");
+        h.create(run.clone()).await.unwrap();
+        let err = h.create(run).await.expect_err("duplicate id should fail");
+        assert!(
+            err.to_lowercase().contains("unique") || err.to_lowercase().contains("exists")
         );
     }
 }

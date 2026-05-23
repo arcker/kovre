@@ -32,6 +32,7 @@ pub type ConfigHandle = Arc<ArcSwap<Config>>;
 
 use crate::cli::ServeArgs;
 use crate::serve::models::{JobRun, RestoreRun, Snapshot};
+use crate::serve::restore::{trigger_restore, RestoreError};
 use crate::serve::runs::{trigger_job_run, TriggerError};
 use crate::serve::sync::sync_snapshots;
 
@@ -116,6 +117,20 @@ pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Re
             let runs = Arc::clone(&runs_for_route);
             let cfg = cfg_for_route.load_full();
             async move { handle_trigger(req, runs, cfg).await }
+        });
+
+        // POST /api/jobs/:name/restore — see `serve::restore::trigger_restore`.
+        // Body: { "dest_dir": "<path>" }. 202 + `{id}` on accept;
+        // 400 on bad dest_dir, 404 on unknown job, 409 if a restore
+        // for the same `(job, dest_dir)` is already running. The
+        // actual restore work happens in a spawn_blocking the
+        // handler returns immediately for.
+        let restore_runs_for_route = Arc::clone(&restore_runs);
+        let cfg_for_restore: ConfigHandle = Arc::clone(&cfg_arc);
+        server = server.with_route_async(Method::POST, "/api/jobs/*/restore", move |req| {
+            let runs = Arc::clone(&restore_runs_for_route);
+            let cfg = cfg_for_restore.load_full();
+            async move { handle_restore_trigger(req, runs, cfg).await }
         });
 
         // GET /api/jobs — read-only projection of kovre.yaml's `jobs:` block.
@@ -348,15 +363,89 @@ async fn handle_trigger(
 /// `None` if the path does not match this exact shape (defensive — the
 /// router should already have filtered).
 fn extract_job_name(path: &str) -> Option<String> {
+    extract_job_name_for_action(path, "run")
+}
+
+/// Pull the `<name>` segment out of `/api/jobs/<name>/restore`.
+fn extract_job_name_for_restore(path: &str) -> Option<String> {
+    extract_job_name_for_action(path, "restore")
+}
+
+fn extract_job_name_for_action(path: &str, action: &str) -> Option<String> {
     let stripped = path.strip_prefix("/api/jobs/")?;
     let (name, rest) = stripped.split_once('/')?;
-    if rest != "run" || name.is_empty() {
+    if rest != action || name.is_empty() {
         return None;
     }
     // URL-decode in case the job name contains characters that needed
-    // encoding (spaces, accents, etc.). YAML allows them, the URL must
-    // round-trip cleanly.
+    // encoding (spaces, accents, etc.).
     Some(query::percent_decode(name))
+}
+
+/// HTTP wrapper around `restore::trigger_restore`.
+///
+/// Reads JSON body `{ dest_dir: string }` (16 KiB cap — paths are
+/// tiny), extracts the job name from the path, and maps the outcome
+/// to:
+///   - 202 Accepted with `{"id":"<uuid>", "status":"running"}` on success
+///   - 400 Bad Request when dest_dir is invalid or the body is malformed
+///   - 404 Not Found when the job is unknown
+///   - 409 Conflict when a restore for the same `(job, dest_dir)` is in flight
+///   - 500 Internal Server Error on persistence failure
+async fn handle_restore_trigger(
+    req: RouteRequest,
+    handler: Arc<DeclarativeHttpHandler<RestoreRun>>,
+    cfg: Arc<Config>,
+) -> anyhow::Result<RouteResponse> {
+    use lithair_core::app::request;
+
+    let path = req.uri().path().to_string();
+    let job_name = match extract_job_name_for_restore(&path) {
+        Some(n) => n,
+        None => {
+            return Ok(response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "could not parse job name from path"}),
+            ));
+        }
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Body {
+        dest_dir: String,
+    }
+    let body: Body = match request::read_body_json(req).await {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok(response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "read_body", "reason": e.to_string()}),
+            ));
+        }
+    };
+
+    match trigger_restore(handler, cfg, job_name, body.dest_dir, "dashboard".into()).await {
+        Ok(run_id) => Ok(response::json_value(
+            StatusCode::ACCEPTED,
+            &serde_json::json!({"id": run_id, "status": "running"}),
+        )),
+        Err(RestoreError::UnknownJob { job }) => Ok(response::json_value(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({"error": "unknown_job", "job": job}),
+        )),
+        Err(RestoreError::InvalidDest { reason }) => Ok(response::json_value(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({"error": "invalid_dest", "reason": reason}),
+        )),
+        Err(RestoreError::AlreadyRunning { run_id }) => Ok(response::json_value(
+            StatusCode::CONFLICT,
+            &serde_json::json!({"error": "already_running", "run_id": run_id}),
+        )),
+        Err(RestoreError::Persistence { reason }) => Ok(response::json_value(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &serde_json::json!({"error": "persistence", "reason": reason}),
+        )),
+    }
 }
 
 /// `GET /api/config` — returns the current in-memory config in two
@@ -1137,6 +1226,34 @@ mod tests {
     #[test]
     fn extract_job_name_rejects_unrelated_path() {
         assert!(extract_job_name("/health").is_none());
+    }
+
+    #[test]
+    fn extract_job_name_for_restore_handles_simple_name() {
+        assert_eq!(
+            extract_job_name_for_restore("/api/jobs/documents/restore"),
+            Some("documents".into())
+        );
+    }
+
+    #[test]
+    fn extract_job_name_for_restore_handles_percent_encoded_name() {
+        assert_eq!(
+            extract_job_name_for_restore("/api/jobs/my%20job/restore"),
+            Some("my job".into())
+        );
+    }
+
+    #[test]
+    fn extract_job_name_for_restore_rejects_run_path() {
+        // /api/jobs/<name>/run must not match the restore extractor —
+        // otherwise the trigger semantics would silently overlap.
+        assert!(extract_job_name_for_restore("/api/jobs/documents/run").is_none());
+    }
+
+    #[test]
+    fn extract_job_name_for_restore_rejects_missing_name() {
+        assert!(extract_job_name_for_restore("/api/jobs//restore").is_none());
     }
 
     #[test]

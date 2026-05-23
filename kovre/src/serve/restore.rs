@@ -158,12 +158,6 @@ pub async fn mark_restore_failure(
 ///    id to the caller (so the HTTP layer can answer 202 immediately).
 /// 2. Spawns a Tokio task that runs the restore via `spawn_blocking`
 ///    (engine API is sync) and updates the run on completion.
-//
-// step 1 of Phase 6 only ships the module + model + helpers; the
-// caller (`POST /api/jobs/:name/restore` in `serve::mod`) lands in
-// step 2. The function below is otherwise unused for one PR's worth
-// of time — silence the unused-fn warnings until then.
-#[allow(dead_code)]
 pub async fn trigger_restore(
     handler: Arc<DeclarativeHttpHandler<RestoreRun>>,
     cfg: Arc<Config>,
@@ -214,7 +208,6 @@ pub async fn trigger_restore(
 /// Resolve the repo and call `engine.restore_latest`. Wrapped in
 /// `spawn_blocking` because the rustic restore path can read tens of
 /// GB and we don't want to monopolize the Tokio reactor.
-#[allow(dead_code)] // wired up by `trigger_restore` (see above).
 async fn run_restore(
     job_name: &str,
     job: &Job,

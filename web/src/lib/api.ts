@@ -15,6 +15,17 @@ export interface JobRun {
 	trigger: 'cli' | 'dashboard' | 'scheduled' | string;
 }
 
+export interface RestoreRun {
+	id: string;
+	job_name: string;
+	dest_dir: string;
+	started_at: string;
+	finished_at: string | null;
+	status: 'running' | 'success' | 'failed' | string;
+	failure_reason: string | null;
+	trigger: 'cli' | 'dashboard' | string;
+}
+
 export interface Snapshot {
 	id: string;
 	job_name: string;
@@ -256,6 +267,53 @@ export async function putConfig(yaml: string): Promise<ConfigPayload> {
 	const location = body.location as { line?: number; column?: number } | undefined;
 	const where = location?.line != null ? ` (line ${location.line}, col ${location.column ?? '?'})` : '';
 	throw new Error(`${message}${where}`);
+}
+
+/** Trigger a restore. POST /api/jobs/:name/restore { dest_dir }.
+ *  Resolves to the new RestoreRun id (status="running"); the caller
+ *  polls `getRestoreRun(id)` until terminal state. Throws with a
+ *  human-friendly message on 4xx (invalid dest, unknown job,
+ *  already running). */
+export async function triggerRestore(
+	jobName: string,
+	dest_dir: string
+): Promise<string> {
+	const resp = await fetch(
+		`/api/jobs/${encodeURIComponent(jobName)}/restore`,
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ dest_dir })
+		}
+	);
+	const body = await resp.json().catch(() => ({}) as Record<string, unknown>);
+	if (resp.status === 202) {
+		return body.id as string;
+	}
+	if (resp.status === 400 && body.error === 'invalid_dest') {
+		throw new Error(`invalid destination: ${body.reason ?? 'rejected by server'}`);
+	}
+	if (resp.status === 404 && body.error === 'unknown_job') {
+		throw new Error(`unknown job: ${jobName}`);
+	}
+	if (resp.status === 409 && body.error === 'already_running') {
+		throw new Error(`a restore is already running for this destination (run_id=${body.run_id ?? '?'})`);
+	}
+	throw new Error(
+		(typeof body.reason === 'string' ? body.reason : null) ??
+			`POST /api/jobs/${jobName}/restore → HTTP ${resp.status}`
+	);
+}
+
+/** Fetch a RestoreRun by id (via Lithair's auto-generated GET route).
+ *  Returns `null` on 404, throws on other transport failures. */
+export async function getRestoreRun(id: string): Promise<RestoreRun | null> {
+	const resp = await fetch(`/api/restore_runs/${encodeURIComponent(id)}`);
+	if (resp.status === 404) return null;
+	if (!resp.ok) {
+		throw new Error(`GET /api/restore_runs/${id} → HTTP ${resp.status}`);
+	}
+	return resp.json();
 }
 
 /** Trigger a backup. Resolves to the new run id, or throws with a

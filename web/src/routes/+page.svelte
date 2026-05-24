@@ -387,6 +387,13 @@
 											{v.busy || v.lastRun?.status === 'running' ? '⟳' : '▶'} Run
 										</button>
 										<a
+											class="action-restore"
+											href={`/jobs/${encodeURIComponent(v.job.name)}/restore`}
+											title="Restore this job's content to a destination folder"
+										>
+											↻
+										</a>
+										<a
 											class="action-edit"
 											href={`/jobs/${encodeURIComponent(v.job.name)}/edit`}
 											title="Edit"
@@ -686,6 +693,7 @@
 		opacity: 0.5;
 		cursor: not-allowed;
 	}
+	.action-restore,
 	.action-edit,
 	.action-del {
 		display: inline-flex;
@@ -705,6 +713,11 @@
 	.action-edit:hover {
 		color: #c5cad3;
 		background: #1f242c;
+	}
+	.action-restore:hover {
+		color: #80a8e6;
+		border-color: #2a4d8f;
+		background: #1d2a3f;
 	}
 	.action-del:hover:not(:disabled) {
 		color: #f47373;

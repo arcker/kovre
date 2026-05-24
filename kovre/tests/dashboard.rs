@@ -625,6 +625,79 @@ fn dashboard_end_to_end() {
         v4_count, 2,
         "retention should have pruned the oldest archive (got {v4_count} versions)"
     );
+
+    // ---- Phase 6: restore round-trip via the API ----
+    // The mirror job has been backed up (canonical = v4-photo, doc = v1-doc).
+    // Trigger a restore into a fresh dest and assert the content matches.
+
+    let restore_dest = workspace_root.join("restore_dest");
+    let dest_str = restore_dest.to_string_lossy();
+    let (restore_status, restore_body) = post_json(
+        &a,
+        "/api/jobs/photos-mirror/restore",
+        &serde_json::json!({ "dest_dir": dest_str }),
+    );
+    assert_eq!(
+        restore_status, 202,
+        "restore should be accepted: {restore_body:#}"
+    );
+    let restore_id = restore_body["id"].as_str().expect("restore id");
+    poll_restore_until_terminal(&a, restore_id);
+
+    // The mirror engine's restore_latest copies `<repo>/<job>/<basename>/…`
+    // into `<dest>/<basename>/…`. So the source's basename is `mirror_src`.
+    let restored_root = restore_dest.join("mirror_src");
+    assert!(
+        restored_root.is_dir(),
+        "restored root missing: {}",
+        restored_root.display()
+    );
+    assert_eq!(
+        fs::read(restored_root.join("photo.jpg")).unwrap(),
+        b"v4-photo-even-more",
+        "restore should reflect the latest canonical content"
+    );
+    assert_eq!(
+        fs::read(restored_root.join("doc.txt")).unwrap(),
+        b"v1-doc-content"
+    );
+
+    // Restore unknown job → 404.
+    let (r404_status, r404_body) = post_json(
+        &a,
+        "/api/jobs/ghost/restore",
+        &serde_json::json!({ "dest_dir": dest_str }),
+    );
+    assert_eq!(r404_status, 404);
+    assert_eq!(r404_body["error"], "unknown_job");
+
+    // Restore with invalid dest_dir → 400.
+    let (r400_status, r400_body) = post_json(
+        &a,
+        "/api/jobs/photos-mirror/restore",
+        &serde_json::json!({ "dest_dir": r"C:\Users\..\Windows" }),
+    );
+    assert_eq!(r400_status, 400);
+    assert_eq!(r400_body["error"], "invalid_dest");
+}
+
+/// POST with a JSON body, returning `(status_code, response_json)`.
+/// Mirrors `post_status` but takes a serializable body.
+fn post_json(a: &ureq::Agent, path: &str, body: &serde_json::Value) -> (u16, serde_json::Value) {
+    let resp = a
+        .post(&url(path))
+        .set("content-type", "application/json")
+        .send_string(&body.to_string());
+    match resp {
+        Ok(r) => {
+            let s = r.status();
+            (s, r.into_json().unwrap_or(serde_json::json!({})))
+        }
+        Err(ureq::Error::Status(code, r)) => {
+            (code, r.into_json().unwrap_or(serde_json::json!({})))
+        }
+        Err(e) => panic!("POST {path}: {e}"),
+    }
 }
 
 /// Poll `/api/job_runs/<run_id>` until status is `success` or `failed`.
@@ -642,6 +715,27 @@ fn poll_run_until_terminal(a: &ureq::Agent, run_id: &str) {
         }
         if Instant::now() >= deadline {
             panic!("run {run_id} never reached terminal state (last status={s})");
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Poll `/api/restore_runs/<run_id>` until status is `success` or
+/// `failed`. Same shape as `poll_run_until_terminal` but for the
+/// restore model.
+fn poll_restore_until_terminal(a: &ureq::Agent, run_id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let single = get_json(a, &format!("/api/restore_runs/{run_id}"));
+        let s = single["status"].as_str().unwrap_or("").to_string();
+        if s == "success" {
+            return;
+        }
+        if s == "failed" {
+            panic!("restore {run_id} failed: {single:#}");
+        }
+        if Instant::now() >= deadline {
+            panic!("restore {run_id} never reached terminal state (last status={s})");
         }
         thread::sleep(Duration::from_millis(250));
     }

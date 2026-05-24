@@ -115,19 +115,26 @@ Retention :
 - **mirror** : `keep_versions` (par fichier canonique dans `.versions/`).
 - **rustic** : `keep_last`, `keep_hourly`, `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_yearly` (sur les snapshots).
 
-## Restore (Phase 4)
+## Restore (Phase 6)
 
-kovre expose maintenant `restore_latest(job, dest)` au niveau du trait `BackupEngine`. Un test e2e (`cargo test restore_round_trip`) crée un fixture avec texte/binaire/accents/espaces/imbrication, fait backup + restore, et asserte l'égalité octet-à-octet — pour les deux backends. C'est la garantie de base ("ce que je sauvegarde, je peux le récupérer").
+Depuis le dashboard, chaque job affiche un bouton **↻ Restore** dans la vue inventaire (home). Cliquer ouvre `/jobs/<name>/restore` :
 
-**Pas encore d'UI restore** dans le dashboard. Phase 5 livrera le bouton + le picker de snapshot/version.
+1. Choisir un dossier de destination (pré-rempli `C:\kovre-restore\<job>\<date>`, éditable).
+2. Cliquer **Restore** — le serveur retourne 202, la page poll `GET /api/restore_runs/<id>` toutes les 2 s avec une barre de progression.
+3. Le restore copie la dernière version canonique depuis le repository vers le dossier choisi. **Les sources originales ne sont jamais touchées.**
+4. Statut terminal : ✓ succès (avec le chemin) ou ✗ erreur avec la raison.
 
-En attendant, restore manuel :
+Pour le moment, seul le **latest state** est restaurable (pas de picker de snapshot/version — Phase 7).
 
-- **rustic** :
-  ```sh
-  rustic -r \\nas.local\backup\kovre --password-file C:\ProgramData\Kovre\nas.key restore latest:/ C:\restore-test
-  ```
-- **mirror** : c'est juste des fichiers sur disque, `robocopy` / Explorer / `xcopy` selon préférence. `.versions/<rel>/<stem>-<ts>.<ext>` contient les versions antérieures à l'état courant.
+Fonctionnement par backend :
+- **mirror** : copie `<repo>/<job>/<basename>/…` vers la destination (`.versions/` est exclu — seule la version canonique courante est restaurée). Très rapide.
+- **rustic** : ouvre le repo, sélectionne le snapshot le plus récent tagué `kovre-job:<name>`, et le décompresse via `rustic_core::prepare_restore + restore`. La passphrase est lue automatiquement depuis `password_file`.
+
+Restore manuel (power-users) :
+- **rustic CLI** : `rustic -r \\nas.local\backup\kovre --password-file C:\ProgramData\Kovre\dev.key restore latest:/ C:\restore-test`
+- **mirror** : les fichiers sont natifs, `robocopy` / Explorer / `xcopy` fonctionne. `.versions/<rel>/<stem>-<ts>.<ext>` contient les versions antérieures.
+
+Fiabilité : le test e2e `cargo test restore_round_trip` vérifie l'égalité octet-à-octet (backup → restore → diff) sur un fixture varié (texte, binaire, accents, espaces, imbrication) pour les deux backends. Le test dashboard `dashboard_end_to_end` exerce le cycle complet via API (run → restore → diff on disk).
 
 ## Utilisation
 
@@ -166,9 +173,13 @@ API JSON :
 - `GET /api/job_runs[/:id]` — historique des runs (CRUD auto-généré par Lithair)
 - `GET /api/snapshots[/:id]` — projection des snapshots rustic
 - `GET /api/config` — `{yaml, parsed}` reflétant la config en mémoire
-- `GET /api/templates` — catalogue des 4 templates (documents, dev-repos, steam-saves, custom) avec leur schéma d'options
+- `GET /api/templates` — catalogue des 7 templates (user-files, thunderbird-mail, browser-profiles, dev-repos, steam-saves, user-appdata, custom) avec leur schéma d'options
+- `POST /api/templates/:name/resolve` — résout un template en paths concrets + excludes sur cette machine (body JSON : options du template)
 - `GET /api/fs?path=<dir>` — liste les sous-dossiers de `<dir>` (autocomplete du picker)
 - `POST /api/jobs/:name/run` — déclenche un backup, retourne `{"id":"..."}` (202) ; 409 si un run est déjà en cours
+- `POST /api/jobs/:name/restore` — déclenche un restore (body JSON : `{dest_dir}`) ; 202 + `{id}` (poll via `GET /api/restore_runs/:id`) ; 404 si job inconnu, 400 si dest invalide, 409 si déjà en cours
+- `GET /api/restore_runs[/:id]` — historique des restores (CRUD auto-généré par Lithair)
+- `POST /api/repositories/:name/verify` — check d'intégrité (rustic : metadata + index ; mirror : no-op informant)
 - `POST /api/sync` — re-projette les snapshots depuis rustic (pour récupérer ceux créés en CLI sans redémarrer)
 - `PUT /api/config` — accepte un YAML brut, valide via `Config::from_str`, écrit atomiquement et swap l'`ArcSwap` ; 400 avec `{error, message, location: {line, column}}` si invalide
 - `/health`, `/ready`, `/info` — endpoints opérationnels Lithair
@@ -200,7 +211,7 @@ Un job peut aussi être déclaré sans template : il faut alors fournir `paths` 
 
 - **Pas de restore via l'UI.** Les snapshots sont visibles, le dashboard affiche la commande `rustic restore` à utiliser.
 - **Pas de logs live d'un run en cours.** Le bouton **Run now** poll toutes les 2s jusqu'à fin. SSE/WebSocket viendront plus tard.
-- **Pas d'auth quand `--bind 127.0.0.1`** (default). Pour un bind LAN, prévoir un reverse-proxy authentifié devant — l'auth bearer-token côté kovre n'est pas implémentée.
+- **⚠ Pas d'auth quand `--bind 0.0.0.0`** (LAN). **Ne pas utiliser `--bind 0.0.0.0` sans un reverse-proxy authentifié devant.** Les routes exposées (`PUT /api/config`, `POST /api/jobs/:name/run`, `POST /api/jobs/:name/restore`, `POST /api/repositories/init-password`) permettent respectivement de réécrire la config, lancer un backup (= lecture arbitraire de fichiers), lancer un restore (= écriture arbitraire sur disque), et créer un fichier à un chemin arbitraire. Sur `127.0.0.1` (le défaut) c'est sécurisé par l'isolation de la machine. Sur LAN, tout le réseau local y a accès. L'auth bearer-token côté kovre n'est pas encore implémentée (Phase 7).
 - **Sync snapshots = boot + on-demand.** Un `kovre run` lancé en CLI pendant que `kovre serve` tourne ne fait PAS apparaître automatiquement le snapshot dans le dashboard ; cliquer le bouton **↻ Refresh** dans le header (équivalent à `POST /api/sync`).
 - **CLI vs dashboard décorrélés.** Un `kovre run` CLI crée un snapshot rustic mais **pas** de `JobRun` dans la pipeline dashboard ; seuls les runs déclenchés via `POST /api/jobs/:name/run` apparaissent dans `/runs`.
 

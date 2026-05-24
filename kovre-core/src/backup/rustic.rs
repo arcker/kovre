@@ -14,7 +14,8 @@ use rustic_core::{
 use tracing::{info, warn};
 
 use crate::backup::{
-    BackupEngine, BackupSource, RetentionOutcome, SnapshotInfo, VerifyOutcome, JOB_TAG_PREFIX,
+    BackupEngine, BackupSource, BrowseEntry, RetentionOutcome, SnapshotInfo, VerifyOutcome,
+    JOB_TAG_PREFIX,
 };
 use crate::config::{Repository as RepoConfig, Retention};
 
@@ -314,6 +315,13 @@ impl BackupEngine for RusticEngine {
         );
 
         Ok(VerifyOutcome { ok, messages })
+    }
+
+    fn browse(&self, _job_name: &str, _subpath: &str) -> Result<Vec<BrowseEntry>> {
+        anyhow::bail!(
+            "browse is not supported for the rustic backend — content is encrypted \
+             and deduplicated. Use `rustic ls <snapshot>` CLI to inspect snapshot contents."
+        )
     }
 }
 

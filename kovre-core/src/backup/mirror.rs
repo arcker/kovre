@@ -35,7 +35,8 @@ use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
 use crate::backup::{
-    BackupEngine, BackupSource, RetentionOutcome, SnapshotInfo, VerifyOutcome, JOB_TAG_PREFIX,
+    BackupEngine, BackupSource, BrowseEntry, RetentionOutcome, SnapshotInfo, VerifyOutcome,
+    JOB_TAG_PREFIX,
 };
 use crate::config::{Repository as RepoConfig, Retention};
 
@@ -252,12 +253,6 @@ impl BackupEngine for MirrorEngine {
     }
 
     fn verify(&self) -> Result<VerifyOutcome> {
-        // Mirror stores files natively on the filesystem — there is
-        // no kovre-managed metadata to verify. The OS already
-        // guarantees readability when restore_latest runs, and
-        // filesystem-level corruption is out of scope (would equally
-        // affect the source). Surface the no-op explicitly so the
-        // UI can render an informative message.
         Ok(VerifyOutcome {
             ok: true,
             messages: vec![
@@ -265,6 +260,61 @@ impl BackupEngine for MirrorEngine {
                     .to_string(),
             ],
         })
+    }
+
+    fn browse(&self, job_name: &str, subpath: &str) -> Result<Vec<BrowseEntry>> {
+        let job_root = self.job_root(job_name);
+        if !job_root.exists() {
+            anyhow::bail!(
+                "nothing to browse: mirror job root `{}` does not exist",
+                job_root.display()
+            );
+        }
+        let target = if subpath.is_empty() {
+            job_root.clone()
+        } else {
+            let clean = subpath.replace('/', std::path::MAIN_SEPARATOR_STR);
+            let joined = job_root.join(&clean);
+            if !joined.starts_with(&job_root) {
+                anyhow::bail!("path traversal rejected");
+            }
+            joined
+        };
+        if !target.is_dir() {
+            anyhow::bail!(
+                "browse path `{}` is not a directory",
+                target.display()
+            );
+        }
+
+        let mut entries: Vec<BrowseEntry> = Vec::new();
+        let dir = std::fs::read_dir(&target).with_context(|| {
+            format!("reading directory `{}`", target.display())
+        })?;
+        for entry in dir {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Skip .versions/ at any level — it's internal bookkeeping.
+            if name == VERSIONS_DIR {
+                continue;
+            }
+            let ft = entry.file_type()?;
+            let size = if ft.is_file() {
+                Some(entry.metadata()?.len())
+            } else {
+                None
+            };
+            entries.push(BrowseEntry {
+                name,
+                is_dir: ft.is_dir(),
+                size,
+            });
+        }
+        entries.sort_by(|a, b| {
+            // Dirs first, then alphabetical.
+            b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(entries)
     }
 
     fn apply_retention(

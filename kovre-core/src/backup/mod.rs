@@ -59,6 +59,16 @@ pub struct RetentionOutcome {
     pub forgotten: usize,
 }
 
+/// One entry returned by `browse` — represents a file or directory
+/// at one level of the backup tree.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BrowseEntry {
+    pub name: String,
+    pub is_dir: bool,
+    /// File size in bytes; `None` for directories.
+    pub size: Option<u64>,
+}
+
 /// Outcome of a repository integrity check.
 ///
 /// `ok = true` means no severe error was found. `messages` carries
@@ -124,6 +134,15 @@ pub trait BackupEngine: Send + Sync {
     /// the source of truth and `restore_latest` already exercises
     /// readability). Returned `messages` explains this.
     fn verify(&self) -> Result<VerifyOutcome>;
+
+    /// List the immediate children of `subpath` within the backup
+    /// for `job_name`. `subpath` is relative to the backup root
+    /// (empty string = top level).
+    ///
+    /// For mirror: reads one directory level under the canonical
+    /// tree (`.versions/` excluded). For rustic: returns an error
+    /// (encrypted content is not browsable without a full restore).
+    fn browse(&self, job_name: &str, subpath: &str) -> Result<Vec<BrowseEntry>>;
 }
 
 /// Pick the right engine for a repository, based on its `backend:`

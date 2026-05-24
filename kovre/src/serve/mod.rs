@@ -133,6 +133,17 @@ pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Re
             async move { handle_restore_trigger(req, runs, cfg).await }
         });
 
+        // POST /api/jobs/:name/browse — list the direct children of a
+        // subpath within the backup. Body: { path?: "" }. Drives the
+        // restore page's file browser so the user can see what's in the
+        // backup before restoring. Mirror only — rustic returns 400 with
+        // an explanatory message.
+        let cfg_for_browse: ConfigHandle = Arc::clone(&cfg_arc);
+        server = server.with_route_async(Method::POST, "/api/jobs/*/browse", move |req| {
+            let cfg = cfg_for_browse.load_full();
+            async move { Ok(handle_browse(req, cfg).await) }
+        });
+
         // GET /api/jobs — read-only projection of kovre.yaml's `jobs:` block.
         // We expose it as a list endpoint (no individual /api/jobs/:name route)
         // because the frontend can filter client-side and we keep the API
@@ -369,6 +380,116 @@ fn extract_job_name(path: &str) -> Option<String> {
 /// Pull the `<name>` segment out of `/api/jobs/<name>/restore`.
 fn extract_job_name_for_restore(path: &str) -> Option<String> {
     extract_job_name_for_action(path, "restore")
+}
+
+/// Pull the `<name>` segment out of `/api/jobs/<name>/browse`.
+fn extract_job_name_for_browse(path: &str) -> Option<String> {
+    extract_job_name_for_action(path, "browse")
+}
+
+/// `POST /api/jobs/:name/browse` — list backup contents at a subpath.
+/// Body: `{ "path": "" }` (relative, empty = root). Mirror enumerates
+/// one directory level; rustic returns 400 (encrypted content not
+/// browsable without a full restore).
+async fn handle_browse(req: RouteRequest, cfg: Arc<Config>) -> RouteResponse {
+    use lithair_core::app::request;
+
+    let uri_path = req.uri().path().to_string();
+    let job_name = match extract_job_name_for_browse(&uri_path) {
+        Some(n) => n,
+        None => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "could not parse job name from path"}),
+            );
+        }
+    };
+
+    let job = match cfg.jobs.get(&job_name) {
+        Some(j) => j.clone(),
+        None => {
+            return response::json_value(
+                StatusCode::NOT_FOUND,
+                &serde_json::json!({"error": "unknown_job", "job": job_name}),
+            );
+        }
+    };
+    let repo = match cfg.repositories.get(&job.repository) {
+        Some(r) => r.clone(),
+        None => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "unknown_repository", "repository": job.repository}),
+            );
+        }
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Body {
+        #[serde(default)]
+        path: String,
+    }
+    let bytes = match request::read_body_with_limit(req, 16 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "read_body", "reason": e.to_string()}),
+            );
+        }
+    };
+    let subpath: String = if bytes.is_empty() {
+        String::new()
+    } else {
+        match serde_json::from_slice::<Body>(&bytes) {
+            Ok(b) => b.path,
+            Err(e) => {
+                return response::json_value(
+                    StatusCode::BAD_REQUEST,
+                    &serde_json::json!({"error": "json_parse", "reason": e.to_string()}),
+                );
+            }
+        }
+    };
+
+    let job_name_owned = job_name.clone();
+    let subpath_for_task = subpath.clone();
+    let backend = repo.backend;
+    let result = tokio::task::spawn_blocking(move || {
+        kovre_core::backup::engine_for(&repo).browse(&job_name_owned, &subpath_for_task)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(entries)) => response::json_value(
+            StatusCode::OK,
+            &serde_json::json!({
+                "entries": entries,
+                "path": subpath,
+                "backend": format!("{backend:?}").to_lowercase(),
+            }),
+        ),
+        Ok(Err(e)) => {
+            let msg = format!("{e:#}");
+            let status = if msg.contains("not supported") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            response::json_value(
+                status,
+                &serde_json::json!({
+                    "error": "browse_failed",
+                    "message": msg,
+                    "backend": format!("{backend:?}").to_lowercase(),
+                }),
+            )
+        }
+        Err(join_err) => response::json_value(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &serde_json::json!({"error": "browse_task_panicked", "reason": join_err.to_string()}),
+        ),
+    }
 }
 
 fn extract_job_name_for_action(path: &str, action: &str) -> Option<String> {

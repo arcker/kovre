@@ -67,6 +67,23 @@ pub struct BrowseEntry {
     pub is_dir: bool,
     /// File size in bytes; `None` for directories.
     pub size: Option<u64>,
+    /// Last-modified time as an ISO 8601 string; `None` for directories
+    /// or when the mtime can't be read.
+    pub modified: Option<String>,
+    /// Number of archived versions in `.versions/` for this file.
+    /// Zero for directories or when the backend doesn't track versions.
+    pub versions_count: u32,
+}
+
+/// One archived version of a file found under `.versions/`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VersionInfo {
+    /// Versioned file name (e.g. `famille-2026-05-14-120000.jpg`).
+    pub name: String,
+    /// Extracted timestamp string (e.g. `2026-05-14-120000`).
+    pub timestamp: String,
+    /// Size in bytes.
+    pub size: u64,
 }
 
 /// Outcome of a repository integrity check.
@@ -143,6 +160,25 @@ pub trait BackupEngine: Send + Sync {
     /// tree (`.versions/` excluded). For rustic: returns an error
     /// (encrypted content is not browsable without a full restore).
     fn browse(&self, job_name: &str, subpath: &str) -> Result<Vec<BrowseEntry>>;
+
+    /// List the archived versions of a single file identified by
+    /// `rel_path` (relative to the backup root). Returns newest
+    /// first. Mirror reads `.versions/<rel parent>/` and filters
+    /// by canonical name. Rustic returns an error.
+    fn list_versions(&self, job_name: &str, rel_path: &str) -> Result<Vec<VersionInfo>>;
+
+    /// Restore a subtree of `job_name` into `dest_dir`. If
+    /// `subpath` is `None`, restores everything (same as
+    /// `restore_latest`). If `Some("Photos/2024")`, only that
+    /// sub-directory is restored. Mirror implements filtering;
+    /// rustic ignores `subpath` and always restores the full
+    /// snapshot.
+    fn restore_selective(
+        &self,
+        job_name: &str,
+        dest_dir: &std::path::Path,
+        subpath: Option<&str>,
+    ) -> Result<()>;
 }
 
 /// Pick the right engine for a repository, based on its `backend:`

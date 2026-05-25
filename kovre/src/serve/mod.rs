@@ -144,6 +144,23 @@ pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Re
             async move { Ok(handle_browse(req, cfg).await) }
         });
 
+        // POST /api/jobs/:name/versions — list archived versions of a
+        // single file. Body: { path: "src/hello.txt" }. Mirror only.
+        let cfg_for_versions: ConfigHandle = Arc::clone(&cfg_arc);
+        server = server.with_route_async(Method::POST, "/api/jobs/*/versions", move |req| {
+            let cfg = cfg_for_versions.load_full();
+            async move { Ok(handle_versions(req, cfg).await) }
+        });
+
+        // GET /api/jobs/:name/preview?path=<rel> — serve the raw file
+        // content from the backup with auto-detected Content-Type.
+        // Cap at 10 MiB to avoid serving huge binaries by accident.
+        let cfg_for_preview: ConfigHandle = Arc::clone(&cfg_arc);
+        server = server.with_route_async(Method::GET, "/api/jobs/*/preview", move |req| {
+            let cfg = cfg_for_preview.load_full();
+            async move { Ok(handle_preview(req, cfg).await) }
+        });
+
         // GET /api/jobs — read-only projection of kovre.yaml's `jobs:` block.
         // We expose it as a list endpoint (no individual /api/jobs/:name route)
         // because the frontend can filter client-side and we keep the API
@@ -492,6 +509,197 @@ async fn handle_browse(req: RouteRequest, cfg: Arc<Config>) -> RouteResponse {
     }
 }
 
+/// `POST /api/jobs/:name/versions` — list archived versions of a
+/// single file. Body: `{ path: "src/hello.txt" }`.
+async fn handle_versions(req: RouteRequest, cfg: Arc<Config>) -> RouteResponse {
+    use lithair_core::app::request;
+
+    let uri_path = req.uri().path().to_string();
+    let job_name = match extract_job_name_for_action(&uri_path, "versions") {
+        Some(n) => n,
+        None => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "could not parse job name from path"}),
+            );
+        }
+    };
+
+    let (job, repo) = match resolve_job_and_repo(&cfg, &job_name) {
+        Ok(pair) => pair,
+        Err(resp) => return resp,
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Body {
+        path: String,
+    }
+    let body: Body = match request::read_body_json(req).await {
+        Ok(b) => b,
+        Err(e) => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "read_body", "reason": e.to_string()}),
+            );
+        }
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        kovre_core::backup::engine_for(&repo).list_versions(&job_name, &body.path)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(versions)) => response::json_value(
+            StatusCode::OK,
+            &serde_json::json!({"versions": versions}),
+        ),
+        Ok(Err(e)) => response::json_value(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({"error": "versions_failed", "message": format!("{e:#}")}),
+        ),
+        Err(join_err) => response::json_value(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &serde_json::json!({"error": "versions_task_panicked", "reason": join_err.to_string()}),
+        ),
+    }
+}
+
+const PREVIEW_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
+
+/// `GET /api/jobs/:name/preview?path=<rel>` — serve the raw file from
+/// the backup with an auto-detected Content-Type. Mirror only; the
+/// file is read from `<repo>/<job>/<path>`.
+async fn handle_preview(req: RouteRequest, cfg: Arc<Config>) -> RouteResponse {
+    let uri_path = req.uri().path().to_string();
+    let job_name = match extract_job_name_for_action(&uri_path, "preview") {
+        Some(n) => n,
+        None => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "could not parse job name from path"}),
+            );
+        }
+    };
+
+    let rel_path = match query::param(req.uri().query().unwrap_or(""), "path") {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "missing_path", "hint": "add ?path=<rel> query param"}),
+            );
+        }
+    };
+
+    if rel_path.split(['/', '\\']).any(|seg| seg == "..") {
+        return response::json_value(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({"error": "path_traversal"}),
+        );
+    }
+
+    let (_job, repo) = match resolve_job_and_repo(&cfg, &job_name) {
+        Ok(pair) => pair,
+        Err(resp) => return resp,
+    };
+
+    if repo.backend != kovre_core::config::BackendKind::Mirror {
+        return response::json_value(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({
+                "error": "preview_not_supported",
+                "message": "preview is only available for the mirror backend"
+            }),
+        );
+    }
+
+    let job_root = repo.path.join(&job_name);
+    let clean_rel = rel_path.replace('/', std::path::MAIN_SEPARATOR_STR);
+    let file_path = job_root.join(&clean_rel);
+    if !file_path.starts_with(&job_root) {
+        return response::json_value(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({"error": "path_traversal"}),
+        );
+    }
+
+    if !file_path.is_file() {
+        return response::json_value(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({"error": "file_not_found", "path": rel_path}),
+        );
+    }
+
+    let meta = match std::fs::metadata(&file_path) {
+        Ok(m) => m,
+        Err(e) => {
+            return response::json_value(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &serde_json::json!({"error": "stat_failed", "reason": e.to_string()}),
+            );
+        }
+    };
+    if meta.len() > PREVIEW_MAX_BYTES {
+        return response::json_value(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({
+                "error": "file_too_large",
+                "size": meta.len(),
+                "max": PREVIEW_MAX_BYTES,
+            }),
+        );
+    }
+
+    let bytes = match std::fs::read(&file_path) {
+        Ok(b) => b,
+        Err(e) => {
+            return response::json_value(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &serde_json::json!({"error": "read_failed", "reason": e.to_string()}),
+            );
+        }
+    };
+
+    let content_type = mime_guess::from_path(&file_path)
+        .first_or_octet_stream()
+        .to_string();
+
+    response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", &content_type)
+        .header("Content-Disposition", "inline")
+        .body(bytes)
+}
+
+/// Common logic: resolve a job + its repository from the config.
+fn resolve_job_and_repo(
+    cfg: &Config,
+    job_name: &str,
+) -> Result<(kovre_core::config::Job, kovre_core::config::Repository), RouteResponse> {
+    let job = cfg
+        .jobs
+        .get(job_name)
+        .cloned()
+        .ok_or_else(|| {
+            response::json_value(
+                StatusCode::NOT_FOUND,
+                &serde_json::json!({"error": "unknown_job", "job": job_name}),
+            )
+        })?;
+    let repo = cfg
+        .repositories
+        .get(&job.repository)
+        .cloned()
+        .ok_or_else(|| {
+            response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "unknown_repository", "repository": job.repository}),
+            )
+        })?;
+    Ok((job, repo))
+}
+
 fn extract_job_name_for_action(path: &str, action: &str) -> Option<String> {
     let stripped = path.strip_prefix("/api/jobs/")?;
     let (name, rest) = stripped.split_once('/')?;
@@ -534,6 +742,8 @@ async fn handle_restore_trigger(
     #[derive(serde::Deserialize)]
     struct Body {
         dest_dir: String,
+        #[serde(default)]
+        subpath: Option<String>,
     }
     let body: Body = match request::read_body_json(req).await {
         Ok(b) => b,
@@ -545,7 +755,7 @@ async fn handle_restore_trigger(
         }
     };
 
-    match trigger_restore(handler, cfg, job_name, body.dest_dir, "dashboard".into()).await {
+    match trigger_restore(handler, cfg, job_name, body.dest_dir, body.subpath, "dashboard".into()).await {
         Ok(run_id) => Ok(response::json_value(
             StatusCode::ACCEPTED,
             &serde_json::json!({"id": run_id, "status": "running"}),

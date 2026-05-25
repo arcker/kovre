@@ -15,7 +15,7 @@ use tracing::{info, warn};
 
 use crate::backup::{
     BackupEngine, BackupSource, BrowseEntry, RetentionOutcome, SnapshotInfo, VerifyOutcome,
-    JOB_TAG_PREFIX,
+    VersionInfo, JOB_TAG_PREFIX,
 };
 use crate::config::{Repository as RepoConfig, Retention};
 
@@ -322,6 +322,24 @@ impl BackupEngine for RusticEngine {
             "browse is not supported for the rustic backend — content is encrypted \
              and deduplicated. Use `rustic ls <snapshot>` CLI to inspect snapshot contents."
         )
+    }
+
+    fn list_versions(&self, _job_name: &str, _rel_path: &str) -> Result<Vec<VersionInfo>> {
+        anyhow::bail!(
+            "version history is not available for the rustic backend — \
+             rustic uses immutable snapshots, not per-file versioning."
+        )
+    }
+
+    fn restore_selective(
+        &self,
+        job_name: &str,
+        dest_dir: &Path,
+        _subpath: Option<&str>,
+    ) -> Result<()> {
+        // Rustic doesn't support partial restore via rustic_core easily;
+        // fall back to full restore.
+        self.restore_latest(job_name, dest_dir)
     }
 }
 

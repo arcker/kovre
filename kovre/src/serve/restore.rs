@@ -163,6 +163,7 @@ pub async fn trigger_restore(
     cfg: Arc<Config>,
     job_name: String,
     dest_dir: String,
+    subpath: Option<String>,
     trigger: String,
 ) -> Result<String, RestoreError> {
     let run = register_restore_run(&handler, &cfg, &job_name, &dest_dir, &trigger).await?;
@@ -178,7 +179,7 @@ pub async fn trigger_restore(
 
     let handler_for_task = Arc::clone(&handler);
     tokio::spawn(async move {
-        let outcome = run_restore(&job_name, &job, repo, &dest_dir_owned).await;
+        let outcome = run_restore(&job_name, &job, repo, &dest_dir_owned, subpath.as_deref()).await;
         match outcome {
             Ok(()) => {
                 info!(
@@ -213,6 +214,7 @@ async fn run_restore(
     job: &Job,
     repo: Option<Repository>,
     dest_dir: &str,
+    subpath: Option<&str>,
 ) -> anyhow::Result<()> {
     let repo = repo.ok_or_else(|| {
         anyhow::anyhow!(
@@ -222,8 +224,13 @@ async fn run_restore(
     })?;
     let job_name_owned = job_name.to_string();
     let dest_path = PathBuf::from(dest_dir);
+    let subpath_owned = subpath.map(|s| s.to_string());
     tokio::task::spawn_blocking(move || {
-        backup::engine_for(&repo).restore_latest(&job_name_owned, &dest_path)
+        backup::engine_for(&repo).restore_selective(
+            &job_name_owned,
+            &dest_path,
+            subpath_owned.as_deref(),
+        )
     })
     .await
     .map_err(|e| anyhow::anyhow!("restore task panicked: {e}"))?

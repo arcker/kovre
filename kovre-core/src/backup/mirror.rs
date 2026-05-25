@@ -36,7 +36,7 @@ use walkdir::WalkDir;
 
 use crate::backup::{
     BackupEngine, BackupSource, BrowseEntry, RetentionOutcome, SnapshotInfo, VerifyOutcome,
-    JOB_TAG_PREFIX,
+    VersionInfo, JOB_TAG_PREFIX,
 };
 use crate::config::{Repository as RepoConfig, Retention};
 
@@ -287,6 +287,12 @@ impl BackupEngine for MirrorEngine {
             );
         }
 
+        let versions_root = self.versions_root(job_name);
+        // Build a quick index of version counts per canonical name in
+        // the versions dir that corresponds to `target`. This is a
+        // single read_dir — cheap even for a few hundred entries.
+        let versions_counts = count_versions_in_dir(&versions_root, &target, &job_root);
+
         let mut entries: Vec<BrowseEntry> = Vec::new();
         let dir = std::fs::read_dir(&target).with_context(|| {
             format!("reading directory `{}`", target.display())
@@ -294,27 +300,163 @@ impl BackupEngine for MirrorEngine {
         for entry in dir {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            // Skip .versions/ at any level — it's internal bookkeeping.
             if name == VERSIONS_DIR {
                 continue;
             }
             let ft = entry.file_type()?;
-            let size = if ft.is_file() {
-                Some(entry.metadata()?.len())
+            let (size, modified) = if ft.is_file() {
+                let meta = entry.metadata()?;
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| {
+                        let dur = t.duration_since(std::time::UNIX_EPOCH).ok()?;
+                        let ts = jiff::Timestamp::from_second(dur.as_secs() as i64).ok()?;
+                        Some(ts.to_string())
+                    });
+                (Some(meta.len()), mtime)
             } else {
-                None
+                (None, None)
+            };
+            let vc = if ft.is_file() {
+                versions_counts.get(&name).copied().unwrap_or(0)
+            } else {
+                0
             };
             entries.push(BrowseEntry {
                 name,
                 is_dir: ft.is_dir(),
                 size,
+                modified,
+                versions_count: vc,
             });
         }
         entries.sort_by(|a, b| {
-            // Dirs first, then alphabetical.
             b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name))
         });
         Ok(entries)
+    }
+
+    fn list_versions(&self, job_name: &str, rel_path: &str) -> Result<Vec<VersionInfo>> {
+        let versions_root = self.versions_root(job_name);
+        let rel = Path::new(rel_path);
+        let rel_parent = rel.parent().unwrap_or_else(|| Path::new(""));
+        let file_name = rel
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("cannot derive file name from `{rel_path}`"))?
+            .to_string_lossy()
+            .into_owned();
+
+        let versions_dir = versions_root.join(rel_parent);
+        if !versions_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+
+        let mut out: Vec<VersionInfo> = Vec::new();
+        for entry in std::fs::read_dir(&versions_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let vname = entry.file_name().to_string_lossy().into_owned();
+            if let Some((canonical, ts)) = parse_versioned_name(&vname) {
+                if canonical == file_name {
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    out.push(VersionInfo {
+                        name: vname,
+                        timestamp: ts,
+                        size,
+                    });
+                }
+            }
+        }
+        // Newest first.
+        out.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(out)
+    }
+
+    fn restore_selective(
+        &self,
+        job_name: &str,
+        dest_dir: &Path,
+        subpath: Option<&str>,
+    ) -> Result<()> {
+        let job_root = self.job_root(job_name);
+        if !job_root.exists() {
+            anyhow::bail!(
+                "nothing to restore: mirror job root `{}` does not exist",
+                job_root.display()
+            );
+        }
+        std::fs::create_dir_all(dest_dir)?;
+
+        let src_root = match subpath {
+            Some(sp) if !sp.is_empty() => {
+                let clean = sp.replace('/', std::path::MAIN_SEPARATOR_STR);
+                let joined = job_root.join(&clean);
+                if !joined.starts_with(&job_root) {
+                    anyhow::bail!("path traversal rejected in subpath");
+                }
+                joined
+            }
+            _ => job_root.clone(),
+        };
+
+        if !src_root.exists() {
+            anyhow::bail!(
+                "subpath `{}` does not exist in the backup",
+                src_root.display()
+            );
+        }
+
+        let mut copied = 0usize;
+
+        if src_root.is_file() {
+            // Single file restore.
+            let name = src_root
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("no file name"))?;
+            let dest = dest_dir.join(name);
+            copy_file_atomic(&src_root, &dest)?;
+            copied += 1;
+        } else {
+            // Directory subtree restore.
+            for entry in WalkDir::new(&src_root).follow_links(false) {
+                let entry = entry.context("walking restore source")?;
+                let path = entry.path();
+                if path == src_root {
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&src_root)
+                    .expect("walkdir under src_root");
+                // Skip .versions/ in subtree.
+                if rel
+                    .components()
+                    .next()
+                    .map(|c| c.as_os_str() == std::ffi::OsStr::new(VERSIONS_DIR))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let target = dest_dir.join(rel);
+                if entry.file_type().is_dir() {
+                    std::fs::create_dir_all(&target)?;
+                } else if entry.file_type().is_file() {
+                    if let Some(parent) = target.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    copy_file_atomic(path, &target)?;
+                    copied += 1;
+                }
+            }
+        }
+
+        if copied == 0 {
+            anyhow::bail!("nothing to restore (no files under the given subpath)");
+        }
+        info!(job = job_name, files = copied, ?subpath, "mirror selective restore complete");
+        Ok(())
     }
 
     fn apply_retention(
@@ -672,6 +814,40 @@ fn hostname() -> String {
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "unknown".into())
+}
+
+/// For a given directory being browsed, count how many archived
+/// versions exist per canonical file name. Returns a map
+/// `canonical_name → count`. Cheap: one `read_dir` of the
+/// `.versions/` counterpart of the browsed directory.
+fn count_versions_in_dir(
+    versions_root: &Path,
+    browsed_dir: &Path,
+    job_root: &Path,
+) -> HashMap<String, u32> {
+    let mut out: HashMap<String, u32> = HashMap::new();
+    let rel = match browsed_dir.strip_prefix(job_root) {
+        Ok(r) => r,
+        Err(_) => return out,
+    };
+    let versions_dir = versions_root.join(rel);
+    if !versions_dir.is_dir() {
+        return out;
+    }
+    let entries = match std::fs::read_dir(&versions_dir) {
+        Ok(it) => it,
+        Err(_) => return out,
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some((canonical, _ts)) = parse_versioned_name(&name) {
+            *out.entry(canonical).or_insert(0) += 1;
+        }
+    }
+    out
 }
 
 fn build_exclude_set(patterns: &[String]) -> Result<GlobSet> {

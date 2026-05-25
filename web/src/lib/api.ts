@@ -225,6 +225,30 @@ export async function resolveTemplate(
 	return resp.json();
 }
 
+export interface BrowseEntry {
+	name: string;
+	is_dir: boolean;
+	size: number | null;
+}
+
+export interface BrowseResult {
+	entries: BrowseEntry[];
+	path: string;
+	backend: string;
+}
+
+/** Browse the backup contents at `subpath`. Resolves to `null` on
+ *  error (rustic backend = not supported, or job never backed up). */
+export async function browseJob(jobName: string, subpath = ''): Promise<BrowseResult | null> {
+	const resp = await fetch(`/api/jobs/${encodeURIComponent(jobName)}/browse`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ path: subpath })
+	});
+	if (!resp.ok) return null;
+	return resp.json();
+}
+
 export interface VerifyOutcome {
 	ok: boolean;
 	messages: string[];

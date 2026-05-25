@@ -3,15 +3,18 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import {
+		browseJob,
 		getConfig,
 		getRestoreRun,
 		listJobs,
 		triggerRestore,
+		type BrowseEntry,
+		type BrowseResult,
 		type ConfigPayload,
 		type Job,
 		type RestoreRun
 	} from '$lib/api';
-	import { formatRelative } from '$lib/format';
+	import { formatBytes, formatRelative } from '$lib/format';
 	import DirInput from '$lib/DirInput.svelte';
 
 	const jobName = $derived(page.params.name ?? '');
@@ -22,6 +25,13 @@
 	let loading = $state(true);
 	let loadError = $state<string | null>(null);
 
+	// ---- Browse state ----
+	let browseResult = $state<BrowseResult | null>(null);
+	let browsePath = $state('');
+	let browseLoading = $state(false);
+	let browseUnsupported = $state(false);
+
+	// ---- Restore state ----
 	let submitting = $state(false);
 	let runId = $state<string | null>(null);
 	let run = $state<RestoreRun | null>(null);
@@ -49,16 +59,47 @@
 				return;
 			}
 			// Default destination: C:\kovre-restore\<job>\<YYYY-MM-DD>
-			// (the user can edit; this is just a sane suggestion to
-			// avoid accidental writes to e.g. the source folder).
 			const today = new Date().toISOString().slice(0, 10);
 			destDir = `C:\\kovre-restore\\${jobName}\\${today}`;
+			// Start initial browse (non-blocking for the page load).
+			loadBrowse('');
 		} catch (e) {
 			loadError = e instanceof Error ? e.message : String(e);
 		} finally {
 			loading = false;
 		}
 	});
+
+	async function loadBrowse(subpath: string) {
+		browseLoading = true;
+		browsePath = subpath;
+		const result = await browseJob(jobName, subpath);
+		browseLoading = false;
+		if (result) {
+			browseResult = result;
+			browseUnsupported = false;
+		} else {
+			browseResult = null;
+			browseUnsupported = true;
+		}
+	}
+
+	function navigateBrowse(name: string) {
+		const next = browsePath ? `${browsePath}/${name}` : name;
+		loadBrowse(next);
+	}
+
+	function browseUp() {
+		const parts = browsePath.split('/').filter((s) => s.length > 0);
+		parts.pop();
+		loadBrowse(parts.join('/'));
+	}
+
+	const breadcrumb = $derived(
+		browsePath
+			.split('/')
+			.filter((s) => s.length > 0)
+	);
 
 	onDestroy(() => {
 		if (pollHandle != null) clearTimeout(pollHandle);
@@ -135,6 +176,72 @@
 	</p>
 
 	{#if !run}
+		<!-- Browse: what's in this backup -->
+		{#if browseUnsupported}
+			<section class="browse-info">
+				<p>This backup uses the <strong>rustic</strong> backend (encrypted). Browse is not
+				available — use <code>rustic ls</code> CLI to inspect snapshot contents.</p>
+			</section>
+		{:else if browseResult}
+			<section class="browse">
+				<h3>What's in this backup</h3>
+				<nav class="breadcrumb">
+					<button
+						type="button"
+						class="crumb"
+						class:current={browsePath === ''}
+						onclick={() => loadBrowse('')}
+					>
+						/
+					</button>
+					{#each breadcrumb as segment, i}
+						<span class="sep">/</span>
+						<button
+							type="button"
+							class="crumb"
+							class:current={i === breadcrumb.length - 1}
+							onclick={() => loadBrowse(breadcrumb.slice(0, i + 1).join('/'))}
+						>
+							{segment}
+						</button>
+					{/each}
+				</nav>
+				{#if browseLoading}
+					<p class="muted">Loading…</p>
+				{:else}
+					{#if browsePath !== ''}
+						<button type="button" class="entry dir" onclick={browseUp}>
+							<span class="entry-icon">⬆</span>
+							<span class="entry-name">..</span>
+						</button>
+					{/if}
+					{#each browseResult.entries as entry (entry.name)}
+						{#if entry.is_dir}
+							<button
+								type="button"
+								class="entry dir"
+								onclick={() => navigateBrowse(entry.name)}
+							>
+								<span class="entry-icon">📁</span>
+								<span class="entry-name">{entry.name}</span>
+							</button>
+						{:else}
+							<div class="entry file">
+								<span class="entry-icon">📄</span>
+								<span class="entry-name">{entry.name}</span>
+								{#if entry.size != null}
+									<span class="entry-size">{formatBytes(entry.size)}</span>
+								{/if}
+							</div>
+						{/if}
+					{/each}
+					{#if browseResult.entries.length === 0}
+						<p class="muted">Empty directory.</p>
+					{/if}
+				{/if}
+			</section>
+		{/if}
+
 		<form
 			onsubmit={(e) => {
 				e.preventDefault();
@@ -261,6 +368,109 @@
 		background: #1f3a2c;
 		color: #6ad08e;
 		border: 1px solid #2a4d3f;
+	}
+
+	.browse-info {
+		padding: 0.8rem 1rem;
+		background: #1f242c;
+		border-left: 3px solid #6a7180;
+		border-radius: 4px;
+		max-width: 640px;
+		margin-bottom: 1.2rem;
+	}
+	.browse-info p {
+		margin: 0;
+		color: #9aa3b2;
+		font-size: 0.88rem;
+	}
+	.browse-info code {
+		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
+		color: #c5cad3;
+	}
+
+	.browse {
+		max-width: 640px;
+		margin-bottom: 1.5rem;
+		padding: 1rem 1.2rem;
+		background: #161a21;
+		border: 1px solid #2a2f38;
+		border-radius: 6px;
+	}
+	.browse h3 {
+		margin: 0 0 0.6rem;
+		font-size: 0.95rem;
+		font-weight: 500;
+		color: #c5cad3;
+	}
+
+	.breadcrumb {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 0.1rem;
+		margin-bottom: 0.7rem;
+		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
+		font-size: 0.82rem;
+	}
+	.crumb {
+		padding: 0.15rem 0.4rem;
+		background: transparent;
+		border: none;
+		color: #80a8e6;
+		cursor: pointer;
+		font: inherit;
+		border-radius: 3px;
+	}
+	.crumb:hover {
+		background: #1d2a3f;
+	}
+	.crumb.current {
+		color: #e6e8eb;
+		font-weight: 500;
+		cursor: default;
+	}
+	.sep {
+		color: #4a5564;
+	}
+
+	.entry {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		width: 100%;
+		padding: 0.35rem 0.5rem;
+		border: none;
+		border-radius: 3px;
+		background: transparent;
+		text-align: left;
+		font: inherit;
+		font-size: 0.88rem;
+		color: #c5cad3;
+	}
+	.entry.dir {
+		cursor: pointer;
+	}
+	.entry.dir:hover {
+		background: #1d2a3f;
+		color: #e6e8eb;
+	}
+	.entry-icon {
+		width: 1.2rem;
+		text-align: center;
+		flex-shrink: 0;
+	}
+	.entry-name {
+		flex: 1;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
+	}
+	.entry-size {
+		color: #6a7180;
+		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
+		font-size: 0.78rem;
+		flex-shrink: 0;
 	}
 
 	form {

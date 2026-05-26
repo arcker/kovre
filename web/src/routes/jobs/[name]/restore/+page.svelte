@@ -6,13 +6,17 @@
 		browseJob,
 		getConfig,
 		getRestoreRun,
+		listFileVersions,
 		listJobs,
+		previewUrl,
 		triggerRestore,
+		triggerSelectiveRestore,
 		type BrowseEntry,
 		type BrowseResult,
 		type ConfigPayload,
 		type Job,
-		type RestoreRun
+		type RestoreRun,
+		type VersionEntry
 	} from '$lib/api';
 	import { formatBytes, formatRelative } from '$lib/format';
 	import DirInput from '$lib/DirInput.svelte';
@@ -30,6 +34,12 @@
 	let browsePath = $state('');
 	let browseLoading = $state(false);
 	let browseUnsupported = $state(false);
+
+	// ---- File detail panel ----
+	let selectedFile = $state<BrowseEntry | null>(null);
+	let selectedFilePath = $state('');
+	let fileVersions = $state<VersionEntry[]>([]);
+	let versionsLoading = $state(false);
 
 	// ---- Restore state ----
 	let submitting = $state(false);
@@ -99,6 +109,33 @@
 		browsePath
 			.split('/')
 			.filter((s) => s.length > 0)
+	);
+
+	async function selectFile(entry: BrowseEntry) {
+		selectedFile = entry;
+		selectedFilePath = browsePath ? `${browsePath}/${entry.name}` : entry.name;
+		fileVersions = [];
+		versionsLoading = true;
+		fileVersions = await listFileVersions(jobName, selectedFilePath);
+		versionsLoading = false;
+	}
+
+	function closeDetail() {
+		selectedFile = null;
+		selectedFilePath = '';
+		fileVersions = [];
+	}
+
+	const previewSrc = $derived(
+		selectedFile && !selectedFile.is_dir
+			? previewUrl(jobName, selectedFilePath)
+			: ''
+	);
+	const isImage = $derived(
+		selectedFile?.name.match(/\.(jpe?g|png|gif|webp|bmp|svg|ico)$/i) != null
+	);
+	const isText = $derived(
+		selectedFile?.name.match(/\.(txt|md|json|ya?ml|toml|ini|cfg|log|csv|xml|html?)$/i) != null
 	);
 
 	onDestroy(() => {
@@ -226,19 +263,87 @@
 								<span class="entry-name">{entry.name}</span>
 							</button>
 						{:else}
-							<div class="entry file">
+							<button
+								type="button"
+								class="entry file"
+								class:selected={selectedFile?.name === entry.name && !selectedFile?.is_dir}
+								onclick={() => selectFile(entry)}
+							>
 								<span class="entry-icon">📄</span>
 								<span class="entry-name">{entry.name}</span>
+								{#if entry.versions_count > 0}
+									<span class="entry-versions" title="{entry.versions_count} archived version(s)">
+										{entry.versions_count}v
+									</span>
+								{/if}
+								{#if entry.modified}
+									<span class="entry-date">{formatRelative(entry.modified)}</span>
+								{/if}
 								{#if entry.size != null}
 									<span class="entry-size">{formatBytes(entry.size)}</span>
 								{/if}
-							</div>
+							</button>
 						{/if}
 					{/each}
 					{#if browseResult.entries.length === 0}
 						<p class="muted">Empty directory.</p>
 					{/if}
 				{/if}
+			</section>
+		{/if}
+
+		<!-- File detail panel -->
+		{#if selectedFile && !selectedFile.is_dir}
+			<section class="detail">
+				<div class="detail-head">
+					<h3>{selectedFile.name}</h3>
+					<button type="button" class="detail-close" onclick={closeDetail}>×</button>
+				</div>
+				<dl class="detail-meta">
+					<dt>Path</dt>
+					<dd class="mono">{selectedFilePath}</dd>
+					<dt>Size</dt>
+					<dd>{selectedFile.size != null ? formatBytes(selectedFile.size) : '—'}</dd>
+					{#if selectedFile.modified}
+						<dt>Modified</dt>
+						<dd>{formatRelative(selectedFile.modified)}</dd>
+					{/if}
+				</dl>
+
+				{#if isImage}
+					<img class="preview-img" src={previewSrc} alt={selectedFile.name} />
+				{:else if isText}
+					<iframe class="preview-text" src={previewSrc} title="Preview"></iframe>
+				{/if}
+
+				{#if versionsLoading}
+					<p class="muted">Loading versions…</p>
+				{:else if fileVersions.length > 0}
+					<h4>Archived versions ({fileVersions.length})</h4>
+					<ul class="versions-list">
+						{#each fileVersions as v (v.name)}
+							<li class="version-item">
+								<span class="version-ts">{v.timestamp}</span>
+								<span class="version-size">{formatBytes(v.size)}</span>
+							</li>
+						{/each}
+					</ul>
+				{:else}
+					<p class="muted">No archived versions.</p>
+				{/if}
+
+				<div class="detail-actions">
+					<button
+						type="button"
+						class="submit"
+						onclick={() => {
+							destDir = `C:\\kovre-restore\\${jobName}\\${new Date().toISOString().slice(0, 10)}`;
+							submit();
+						}}
+					>
+						↻ Restore this file
+					</button>
+				</div>
 			</section>
 		{/if}
 
@@ -447,12 +552,32 @@
 		font-size: 0.88rem;
 		color: #c5cad3;
 	}
-	.entry.dir {
+	.entry.dir,
+	.entry.file {
 		cursor: pointer;
 	}
-	.entry.dir:hover {
+	.entry.dir:hover,
+	.entry.file:hover {
 		background: #1d2a3f;
 		color: #e6e8eb;
+	}
+	.entry.file.selected {
+		background: #1d2a3f;
+		border-left: 2px solid #80a8e6;
+	}
+	.entry-versions {
+		color: #f5d36a;
+		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
+		font-size: 0.72rem;
+		background: #3a341f;
+		padding: 0.05rem 0.35rem;
+		border-radius: 3px;
+		flex-shrink: 0;
+	}
+	.entry-date {
+		color: #6a7180;
+		font-size: 0.75rem;
+		flex-shrink: 0;
 	}
 	.entry-icon {
 		width: 1.2rem;
@@ -471,6 +596,111 @@
 		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
 		font-size: 0.78rem;
 		flex-shrink: 0;
+	}
+
+	.detail {
+		max-width: 640px;
+		margin-bottom: 1.5rem;
+		padding: 1rem 1.2rem;
+		background: #161a21;
+		border: 1px solid #2a4d8f;
+		border-radius: 6px;
+	}
+	.detail-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 0.6rem;
+	}
+	.detail-head h3 {
+		margin: 0;
+		font-size: 0.95rem;
+		font-weight: 500;
+		color: #e6e8eb;
+		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
+	}
+	.detail-close {
+		background: transparent;
+		border: 1px solid #2a2f38;
+		border-radius: 3px;
+		color: #6a7180;
+		font-size: 1rem;
+		cursor: pointer;
+		width: 1.6rem;
+		height: 1.6rem;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+	}
+	.detail-close:hover {
+		color: #e6e8eb;
+		background: #1f242c;
+	}
+	.detail-meta {
+		display: grid;
+		grid-template-columns: max-content 1fr;
+		gap: 0.25rem 0.7rem;
+		margin: 0 0 0.8rem;
+		font-size: 0.85rem;
+	}
+	.detail-meta dt {
+		color: #6a7180;
+	}
+	.detail-meta dd {
+		margin: 0;
+		color: #c5cad3;
+	}
+
+	.preview-img {
+		max-width: 100%;
+		max-height: 300px;
+		border-radius: 4px;
+		margin-bottom: 0.8rem;
+		background: #0a0c10;
+	}
+	.preview-text {
+		width: 100%;
+		height: 200px;
+		border: 1px solid #2a2f38;
+		border-radius: 4px;
+		background: #0f1115;
+		margin-bottom: 0.8rem;
+	}
+
+	.detail h4 {
+		margin: 0.5rem 0 0.3rem;
+		font-size: 0.85rem;
+		font-weight: 500;
+		color: #c5cad3;
+	}
+	.versions-list {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+	}
+	.version-item {
+		display: flex;
+		gap: 0.6rem;
+		padding: 0.25rem 0.4rem;
+		border-radius: 3px;
+		font-size: 0.82rem;
+	}
+	.version-item:hover {
+		background: #1a1f27;
+	}
+	.version-ts {
+		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
+		color: #9aa3b2;
+	}
+	.version-size {
+		color: #6a7180;
+		margin-left: auto;
+	}
+	.detail-actions {
+		margin-top: 0.8rem;
 	}
 
 	form {

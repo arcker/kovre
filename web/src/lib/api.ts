@@ -229,6 +229,8 @@ export interface BrowseEntry {
 	name: string;
 	is_dir: boolean;
 	size: number | null;
+	modified: string | null;
+	versions_count: number;
 }
 
 export interface BrowseResult {
@@ -247,6 +249,57 @@ export async function browseJob(jobName: string, subpath = ''): Promise<BrowseRe
 	});
 	if (!resp.ok) return null;
 	return resp.json();
+}
+
+export interface VersionEntry {
+	name: string;
+	timestamp: string;
+	size: number;
+}
+
+/** List the archived versions of a specific file in .versions/. */
+export async function listFileVersions(
+	jobName: string,
+	path: string
+): Promise<VersionEntry[]> {
+	const resp = await fetch(`/api/jobs/${encodeURIComponent(jobName)}/versions`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ path })
+	});
+	if (!resp.ok) return [];
+	const body = await resp.json();
+	return body.versions ?? [];
+}
+
+/** Get a preview URL for a backup file (image, text, etc.). */
+export function previewUrl(jobName: string, path: string): string {
+	return `/api/jobs/${encodeURIComponent(jobName)}/preview?path=${encodeURIComponent(path)}`;
+}
+
+/** Trigger a selective restore (only a subpath). */
+export async function triggerSelectiveRestore(
+	jobName: string,
+	dest_dir: string,
+	subpath: string
+): Promise<string> {
+	const resp = await fetch(
+		`/api/jobs/${encodeURIComponent(jobName)}/restore`,
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ dest_dir, subpath })
+		}
+	);
+	const body = await resp.json().catch(() => ({}) as Record<string, unknown>);
+	if (resp.status === 202) {
+		return body.id as string;
+	}
+	throw new Error(
+		typeof body.reason === 'string'
+			? body.reason
+			: `HTTP ${resp.status}`
+	);
 }
 
 export interface VerifyOutcome {

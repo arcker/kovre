@@ -6,7 +6,9 @@
 		getConfig,
 		listTemplates,
 		putConfig,
+		resolveTemplate,
 		type ConfigPayload,
+		type ResolvedTemplate,
 		type Template
 	} from '$lib/api';
 	import { addJob, emitConfigYaml, type JobDraft } from '$lib/yaml';
@@ -32,6 +34,11 @@
 	let submitting = $state(false);
 	let submitMessage = $state<string | null>(null);
 	let submitError = $state<string | null>(null);
+
+	// ---- Template resolution preview ----
+	let resolved = $state<ResolvedTemplate | null>(null);
+	let resolveLoading = $state(false);
+	let resolveEmpty = $state(false);
 
 	onMount(async () => {
 		try {
@@ -66,7 +73,45 @@
 		} finally {
 			loading = false;
 		}
+		// Auto-resolve for templates whose options are either absent or
+		// all bools (documents, thunderbird, steam-saves, user-appdata,
+		// browser-profiles). Templates with a `directory` option
+		// (dev-repos scan_root) must NOT auto-resolve: an empty
+		// scan_root would trigger a recursive scan of the home dir
+		// or worse, the drive root. The user fills the field first,
+		// then clicks "Refresh".
+		const hasDirectoryOption = (template?.options ?? []).some(
+			(o) => o.type === 'directory' || o.type === 'directory_list'
+		);
+		if (templateName !== 'custom' && !hasDirectoryOption) {
+			refreshResolve();
+		}
 	});
+
+	async function refreshResolve() {
+		resolveLoading = true;
+		resolveEmpty = false;
+		resolved = null;
+		const opts = buildCurrentOptions();
+		const result = await resolveTemplate(templateName, opts);
+		resolveLoading = false;
+		if (result) {
+			resolved = result;
+			resolveEmpty = result.paths.length === 0;
+		} else {
+			resolveEmpty = true;
+		}
+	}
+
+	function buildCurrentOptions(): Record<string, unknown> | null {
+		if (!template || template.name === 'custom') return null;
+		const opts: Record<string, unknown> = {};
+		for (const opt of template.options) {
+			const v = optionValues[opt.key];
+			if (v != null && v !== '') opts[opt.key] = v;
+		}
+		return Object.keys(opts).length > 0 ? opts : null;
+	}
 
 	function addRow(key: string) {
 		const cur = (optionValues[key] as string[]) ?? [];
@@ -252,6 +297,52 @@
 			</fieldset>
 		{/each}
 
+		<!-- Template resolve preview: what will actually be backed up -->
+		{#if templateName !== 'custom'}
+			<section class="resolve-preview">
+				<div class="resolve-head">
+					<h3>Detected on your machine</h3>
+					<button
+						type="button"
+						class="resolve-refresh"
+						disabled={resolveLoading}
+						onclick={refreshResolve}
+					>
+						{resolveLoading ? '⟳ scanning…' : '↻ Refresh'}
+					</button>
+				</div>
+				{#if resolveLoading}
+					<p class="resolve-muted">Scanning…</p>
+				{:else if resolveEmpty}
+					<p class="resolve-empty">
+						<strong>Nothing found on this machine.</strong>
+						{#if templateName === 'steam-saves'}
+							Is Steam installed? The template looks for Steam via the Windows registry.
+						{:else if templateName === 'thunderbird-mail'}
+							Is Thunderbird installed? The template looks for profiles under %APPDATA%\Thunderbird.
+						{:else if templateName === 'browser-profiles'}
+							No supported browsers detected. Check the toggles above.
+						{:else if templateName === 'dev-repos'}
+							No git repositories found under the scan root. Set a different folder above.
+						{:else}
+							The template could not find matching paths. This job will have nothing to back up.
+						{/if}
+					</p>
+				{:else if resolved}
+					<ul class="resolve-paths">
+						{#each resolved.paths as p}
+							<li class="resolve-path">{p}</li>
+						{/each}
+					</ul>
+					{#if resolved.excludes.length > 0}
+						<p class="resolve-excludes">
+							Excludes: {resolved.excludes.join(', ')}
+						</p>
+					{/if}
+				{/if}
+			</section>
+		{/if}
+
 		<fieldset>
 			<legend>Retention (optional)</legend>
 			<div class="retention">
@@ -416,6 +507,83 @@
 	.row-add:hover {
 		background: #262c36;
 		color: #e6e8eb;
+	}
+
+	.resolve-preview {
+		padding: 0.9rem 1.1rem;
+		background: #161a21;
+		border: 1px solid #2a2f38;
+		border-radius: 6px;
+	}
+	.resolve-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 0.5rem;
+	}
+	.resolve-head h3 {
+		margin: 0;
+		font-size: 0.92rem;
+		font-weight: 500;
+		color: #c5cad3;
+	}
+	.resolve-refresh {
+		padding: 0.25rem 0.6rem;
+		background: #1f242c;
+		border: 1px solid #2a2f38;
+		border-radius: 3px;
+		color: #9aa3b2;
+		font: inherit;
+		font-size: 0.8rem;
+		cursor: pointer;
+	}
+	.resolve-refresh:hover:not(:disabled) {
+		background: #262c36;
+		color: #e6e8eb;
+	}
+	.resolve-refresh:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+	.resolve-muted {
+		margin: 0;
+		color: #6a7180;
+		font-size: 0.85rem;
+	}
+	.resolve-empty {
+		margin: 0;
+		padding: 0.5rem 0.7rem;
+		background: #2a1f1f;
+		border: 1px solid #5a2a2a;
+		border-radius: 4px;
+		color: #f5d36a;
+		font-size: 0.85rem;
+	}
+	.resolve-empty strong {
+		color: #f47373;
+	}
+	.resolve-paths {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+	}
+	.resolve-path {
+		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
+		font-size: 0.82rem;
+		color: #6ad08e;
+		padding: 0.15rem 0;
+	}
+	.resolve-path::before {
+		content: '✓ ';
+		color: #2a8857;
+	}
+	.resolve-excludes {
+		margin: 0.4rem 0 0;
+		color: #6a7180;
+		font-size: 0.78rem;
 	}
 
 	.retention {

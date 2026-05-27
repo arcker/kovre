@@ -164,6 +164,13 @@ impl BackupEngine for MirrorEngine {
             )?;
         }
 
+        if stats.skipped_files > 0 {
+            warn!(
+                job = job_name,
+                skipped = stats.skipped_files,
+                "some files were locked by another process and could not be backed up"
+            );
+        }
         info!(
             job = job_name,
             new = stats.new_files,
@@ -171,6 +178,7 @@ impl BackupEngine for MirrorEngine {
             renamed = stats.renamed_files,
             deleted = stats.deleted_files,
             unchanged = stats.unchanged_files,
+            skipped = stats.skipped_files,
             bytes_copied = stats.bytes_copied,
             "mirror backup complete"
         );
@@ -487,8 +495,26 @@ struct MirrorStats {
     renamed_files: usize,
     deleted_files: usize,
     unchanged_files: usize,
+    skipped_files: usize,
     bytes_copied: u64,
     bytes_total: u64,
+}
+
+/// Detect Windows "sharing violation" (ERROR_SHARING_VIOLATION = 32)
+/// and "lock violation" (ERROR_LOCK_VIOLATION = 33) — files held open
+/// exclusively by another process. These are expected for browser
+/// DBs, editor temp files, Outlook OST, etc. The mirror engine skips
+/// them with a warning instead of failing the entire job.
+fn is_locked_file_error(e: &anyhow::Error) -> bool {
+    for cause in e.chain() {
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            match io_err.raw_os_error() {
+                Some(32) | Some(33) => return true,
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 /// Walk `dest_root` once before the source pass, collecting every
@@ -605,27 +631,44 @@ fn sync_source_into_dest(
                 stats.unchanged_files += 1;
             } else {
                 archive_to_versions(&dest_path, rel, versions_subroot, timestamp)?;
-                let bytes = copy_file_atomic(src_path, &dest_path)?;
-                stats.updated_files += 1;
-                stats.bytes_copied = stats.bytes_copied.saturating_add(bytes);
+                match copy_file_atomic(src_path, &dest_path) {
+                    Ok(bytes) => {
+                        stats.updated_files += 1;
+                        stats.bytes_copied = stats.bytes_copied.saturating_add(bytes);
+                    }
+                    Err(e) if is_locked_file_error(&e) => {
+                        warn!(path = %src_path.display(), "skipping locked file (update): {e:#}");
+                        stats.skipped_files += 1;
+                    }
+                    Err(e) => return Err(e),
+                }
             }
             continue;
         }
 
         // Case 2: no dest entry at this rel — could be a brand-new
         // file, or a rename of something we still hold in
-        // dest_inventory.
+        // dest_inventory. Any step here can hit a locked source file
+        // (browser DBs, editor temps, etc.) — skip gracefully.
         if let Some(parent) = dest_path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!("creating parent of `{}`", dest_path.display())
             })?;
         }
 
-        if let Some(old_rel) =
-            try_match_by_hash(src_path, &src_meta, dest_root, dest_inventory, &mut dest_hash_cache)?
-        {
-            // Rename: move the existing dest file to the new rel
-            // path. No archive, no re-copy — just one rename.
+        let rename_match = match try_match_by_hash(
+            src_path, &src_meta, dest_root, dest_inventory, &mut dest_hash_cache,
+        ) {
+            Ok(m) => m,
+            Err(e) if is_locked_file_error(&e) => {
+                warn!(path = %src_path.display(), "skipping locked file (hash): {e:#}");
+                stats.skipped_files += 1;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+
+        if let Some(old_rel) = rename_match {
             let old_full = dest_root.join(&old_rel);
             debug!(
                 from = %old_full.display(),
@@ -639,14 +682,20 @@ fn sync_source_into_dest(
                     dest_path.display()
                 )
             })?;
-            // Drop the cache entry for the moved file — its rel path
-            // is no longer valid.
             dest_hash_cache.remove(&old_rel);
             stats.renamed_files += 1;
         } else {
-            let bytes = copy_file_atomic(src_path, &dest_path)?;
-            stats.new_files += 1;
-            stats.bytes_copied = stats.bytes_copied.saturating_add(bytes);
+            match copy_file_atomic(src_path, &dest_path) {
+                Ok(bytes) => {
+                    stats.new_files += 1;
+                    stats.bytes_copied = stats.bytes_copied.saturating_add(bytes);
+                }
+                Err(e) if is_locked_file_error(&e) => {
+                    warn!(path = %src_path.display(), "skipping locked file (new): {e:#}");
+                    stats.skipped_files += 1;
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
     Ok(())

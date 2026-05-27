@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import {
 		getConfig,
+		getRepositoriesStatus,
 		listJobs,
 		listJobRuns,
 		listTemplates,
@@ -10,6 +11,7 @@
 		triggerRun,
 		type Job,
 		type JobRun,
+		type RepositoryStatus,
 		type Template
 	} from '$lib/api';
 	import { emitConfigYaml, removeJob } from '$lib/yaml';
@@ -112,18 +114,21 @@
 
 	let views = $state<JobView[]>([]);
 	let templates = $state<Template[]>([]);
+	let repoStatus = $state<Record<string, RepositoryStatus>>({});
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
 	onMount(async () => {
 		try {
-			const [jobs, runs, tmpls, cfg] = await Promise.all([
+			const [jobs, runs, tmpls, cfg, rStatus] = await Promise.all([
 				listJobs(),
 				listJobRuns(),
 				listTemplates(),
-				getConfig()
+				getConfig(),
+				getRepositoriesStatus()
 			]);
 			templates = tmpls;
+			repoStatus = rStatus;
 			const lastRunByJob = mapLastRun(runs);
 			const repoBackendByName = new Map<string, 'rustic' | 'mirror'>();
 			for (const [name, repo] of Object.entries(cfg.parsed.repositories ?? {})) {
@@ -298,6 +303,25 @@
 	//
 	// Per-job traffic light. Soft thresholds — what matters is "is the
 	// last run recent enough that I should feel covered?".
+	const runningJobs = $derived(
+		views.filter((v) => healthKind(v) === 'running').map((v) => v.job.name)
+	);
+	const okCount = $derived(views.filter((v) => healthKind(v) === 'ok').length);
+	const warnCount = $derived(
+		views.filter((v) => ['stale', 'failed'].includes(healthKind(v))).length
+	);
+	const neverCount = $derived(views.filter((v) => healthKind(v) === 'never').length);
+
+	const unreachableRepos = $derived(
+		Object.entries(repoStatus)
+			.filter(([, s]) => !s.reachable)
+			.map(([name]) => name)
+	);
+
+	const allOk = $derived(
+		views.length > 0 && warnCount === 0 && neverCount === 0 && unreachableRepos.length === 0
+	);
+
 	const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 	function healthKind(view: JobView): 'ok' | 'stale' | 'failed' | 'running' | 'never' {
@@ -330,22 +354,50 @@
 </script>
 
 <div class="inventory">
-	<header class="hero">
-		<h2>Your machine</h2>
+	<header class="hero" class:hero-ok={!loading && !error && allOk} class:hero-warn={!loading && !error && (warnCount > 0 || neverCount > 0)}>
 		{#if loading}
-			<p class="muted">Inventorying…</p>
+			<div class="hero-signal">⟳</div>
+			<h2>Checking your backups…</h2>
 		{:else if error}
-			<p class="error">Error: {error}</p>
-		{:else}
-			<p class="hero-line">
-				{#if lastSuccessfulRun}
-					Last successful backup: <strong>{formatRelative(lastSuccessfulRun.finished_at ?? lastSuccessfulRun.started_at)}</strong>
-					({lastSuccessfulRun.job_name})
-				{:else}
-					<span class="warn">No successful backup yet.</span>
+			<div class="hero-signal signal-error">✗</div>
+			<h2>Something went wrong</h2>
+			<p class="hero-sub">{error}</p>
+		{:else if views.length === 0}
+			<div class="hero-signal signal-neutral">○</div>
+			<h2>No backups configured yet</h2>
+			<p class="hero-sub"><a href="/templates">Pick a template to get started →</a></p>
+		{:else if allOk}
+			<div class="hero-signal signal-ok">✓</div>
+			<div>
+				<h2>Your data is safe</h2>
+				<p class="hero-sub">
+					{views.length} job{views.length === 1 ? '' : 's'} · {totalProtectedPaths} path{totalProtectedPaths === 1 ? '' : 's'} protected · last backup {formatRelative(lastSuccessfulRun?.finished_at ?? lastSuccessfulRun?.started_at ?? '')}
+				</p>
+				{#if runningJobs.length > 0}
+					<p class="hero-sub hero-running">⟳ Running: {runningJobs.join(', ')}</p>
 				{/if}
-				· {views.length} job{views.length === 1 ? '' : 's'} configured · {totalProtectedPaths} path{totalProtectedPaths === 1 ? '' : 's'} watched
-			</p>
+			</div>
+		{:else}
+			<div class="hero-signal signal-warn">!</div>
+			<div>
+				<h2>
+					{#if unreachableRepos.length > 0}
+						{unreachableRepos.length} backup destination{unreachableRepos.length === 1 ? ' is' : 's are'} offline
+					{:else if warnCount > 0}
+						{warnCount} job{warnCount === 1 ? '' : 's'} need{warnCount === 1 ? 's' : ''} attention
+					{:else}
+						{neverCount} job{neverCount === 1 ? ' has' : 's have'} never run
+					{/if}
+				</h2>
+				{#if unreachableRepos.length > 0}
+					<p class="hero-sub hero-alert">
+						Unreachable: {unreachableRepos.join(', ')} — is the NAS / external drive connected?
+					</p>
+				{/if}
+				<p class="hero-sub">
+					{okCount} protected · {views.length} total · {totalProtectedPaths} path{totalProtectedPaths === 1 ? '' : 's'}
+				</p>
+			</div>
 		{/if}
 	</header>
 
@@ -366,106 +418,64 @@
 						{#each items as v (v.job.name)}
 							{@const kind = healthKind(v)}
 							<li class={`job kind-${kind}`}>
-								<div class="job-head">
+								<div class="job-row-1">
+									<span class={`status-dot kind-${kind}`}></span>
 									<a class="job-name" href={`/jobs/${encodeURIComponent(v.job.name)}`}>
 										{v.job.name}
 									</a>
-									<span class={`health kind-${kind}`}>{healthLabel(kind)}</span>
-									<span class="when">
-										{v.lastRun
-											? formatRelative(v.lastRun.finished_at ?? v.lastRun.started_at)
-											: '—'}
+									<span class={`health-label kind-${kind}`}>{healthLabel(kind)}</span>
+									<span class="job-when">
+										{v.lastRun ? formatRelative(v.lastRun.finished_at ?? v.lastRun.started_at) : ''}
+									</span>
+									{#if v.lastRun?.bytes_processed != null}
+										<span class="job-size">{formatBytes(v.lastRun.bytes_processed)}</span>
+									{/if}
+								</div>
+
+								<div class="job-row-2">
+									<span class="job-detail">
+										{#if v.resolved && v.resolved.paths.length > 0}
+											{v.resolved.paths.length} path{v.resolved.paths.length === 1 ? '' : 's'} → {v.job.repository}
+										{:else if v.resolved && v.resolved.paths.length === 0}
+											<span class="warn-text">No paths on this machine</span>
+										{:else}
+											→ {v.job.repository}
+										{/if}
+										{#if v.repoBackend}
+											<span class={`badge-sm badge-${v.repoBackend}`}>{v.repoBackend}</span>
+										{/if}
 									</span>
 									<div class="job-actions">
 										<button
 											type="button"
-											class="action-run"
+											class="btn-sm btn-primary"
 											disabled={v.busy || v.lastRun?.status === 'running'}
 											onclick={() => runJob(v.job.name)}
-											title="Run this job now"
 										>
 											{v.busy || v.lastRun?.status === 'running' ? '⟳' : '▶'} Run
 										</button>
-										<a
-											class="action-restore"
-											href={`/jobs/${encodeURIComponent(v.job.name)}/restore`}
-											title="Restore this job's content to a destination folder"
-										>
-											↻
+										<a class="btn-sm btn-ghost" href={`/jobs/${encodeURIComponent(v.job.name)}/restore`}>
+											↻ Restore
 										</a>
-										<a
-											class="action-edit"
-											href={`/jobs/${encodeURIComponent(v.job.name)}/edit`}
-											title="Edit"
-										>
-											✎
+										<a class="btn-sm btn-ghost" href={`/jobs/${encodeURIComponent(v.job.name)}/edit`}>
+											Edit
 										</a>
 										<button
 											type="button"
-											class="action-del"
+											class="btn-sm btn-danger"
 											disabled={v.busy || v.lastRun?.status === 'running'}
 											onclick={() => deleteJob(v.job.name)}
-											title="Delete this job (kovre.yaml only; data on disk is kept)"
 										>
 											×
 										</button>
 									</div>
 								</div>
+
 								{#if v.actionMessage}
 									<p class="action-msg">{v.actionMessage}</p>
 								{/if}
-								<div class="flow">
-									<div class="source">
-										{#if v.resolveError}
-											<p class="resolve-error">Could not resolve paths: {v.resolveError}</p>
-										{:else if v.resolved && v.resolved.paths.length > 0}
-											<ul class="paths">
-												{#each v.resolved.paths as p}
-													<li class="path">{p}</li>
-												{/each}
-											</ul>
-										{:else if v.resolved && v.resolved.paths.length === 0}
-											<p class="empty-paths">
-												Template resolves to <strong>no paths</strong> on this machine —
-												nothing to back up here yet.
-											</p>
-										{:else if v.job.template}
-											<p class="muted">
-												(resolved at run time by template "{v.job.template}")
-											</p>
-										{/if}
-									</div>
-
-									<div class="arrow" aria-hidden="true">→</div>
-
-									<div class="dest">
-										<a href="/repositories" class="dest-name" title="Repository">
-											📦 {v.job.repository}
-										</a>
-										<div class="dest-meta">
-											{#if v.repoBackend}
-												<span class={`backend-badge backend-${v.repoBackend}`}>
-													{v.repoBackend}
-												</span>
-											{/if}
-											{#if v.lastRun?.bytes_processed != null}
-												<span class="dest-stat" title="Bytes covered by the last successful run">
-													{formatBytes(v.lastRun.bytes_processed)}
-												</span>
-											{/if}
-											{#if retentionSummary(v.job)}
-												<span class="dest-stat" title="Retention policy">
-													♻ {retentionSummary(v.job)}
-												</span>
-											{/if}
-										</div>
-									</div>
-								</div>
-
 								{#if v.lastRun?.failure_reason}
-									<p class="failure-banner" title="Last failure reason">
-										⚠ {v.lastRun.failure_reason}
-									</p>
+									<p class="failure-banner">⚠ {v.lastRun.failure_reason}</p>
 								{/if}
 							</li>
 						{/each}
@@ -508,400 +518,355 @@
 	.inventory {
 		display: flex;
 		flex-direction: column;
-		gap: 2rem;
+		gap: 1.6rem;
 	}
 
+	/* ---- Hero "health dashboard" ---- */
 	.hero {
-		padding: 1.4rem 1.6rem;
-		background: #161a21;
-		border: 1px solid #2a2f38;
-		border-radius: 8px;
+		display: flex;
+		align-items: center;
+		gap: 1.2rem;
+		padding: 1.6rem 2rem;
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		transition: background 0.3s, border-color 0.3s;
+	}
+	.hero-ok {
+		background: var(--ok-bg);
+		border-color: var(--ok-border);
+	}
+	.hero-warn {
+		background: var(--warn-bg);
+		border-color: var(--warn-border);
+	}
+	.hero-signal {
+		font-size: 2.4rem;
+		line-height: 1;
+		width: 3rem;
+		height: 3rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 50%;
+		background: var(--surface-raised);
+		color: var(--text-muted);
+		flex-shrink: 0;
+	}
+	.signal-ok {
+		background: var(--ok-border);
+		color: var(--ok);
+	}
+	.signal-warn {
+		background: var(--warn-border);
+		color: var(--warn);
+	}
+	.signal-error {
+		background: var(--error-bg);
+		color: var(--error);
+	}
+	.signal-neutral {
+		background: var(--surface-raised);
+		color: var(--text-muted);
 	}
 	.hero h2 {
-		margin: 0 0 0.4rem;
-		font-size: 1.2rem;
-		font-weight: 500;
-		color: #c5cad3;
-	}
-	.hero-line {
 		margin: 0;
-		color: #9aa3b2;
-		font-size: 0.95rem;
+		font-size: 1.3rem;
+		font-weight: 600;
+		color: var(--text-primary);
 	}
-	.hero-line strong {
-		color: #e6e8eb;
+	.hero-sub {
+		margin: 0.2rem 0 0;
+		color: var(--text-secondary);
+		font-size: 0.92rem;
+	}
+	.hero-sub a {
+		color: var(--accent);
+		text-decoration: none;
+	}
+	.hero-sub a:hover {
+		text-decoration: underline;
+	}
+	.hero-alert {
+		color: var(--warn);
 		font-weight: 500;
 	}
-	.hero-line .warn {
-		color: #f5d36a;
+	.hero-running {
+		color: var(--accent);
 	}
 	.muted {
-		color: #6a7180;
+		color: var(--text-muted);
 		font-size: 0.9rem;
 		margin: 0.3rem 0 0;
 	}
 	.error {
-		color: #f47373;
+		color: var(--error);
 		margin: 0.3rem 0 0;
 	}
 
+	/* ---- Categories grid ---- */
 	.category-grid {
 		display: grid;
 		grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
 		gap: 1.2rem;
 	}
 	.category {
-		padding: 1.3rem 1.6rem 1.5rem;
-		background: #161a21;
-		border: 1px solid #2a2f38;
-		border-radius: 8px;
+		padding: 1.1rem 1.4rem 1.3rem;
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: 10px;
 		display: flex;
 		flex-direction: column;
 	}
 	.category h3 {
 		display: flex;
 		align-items: center;
-		gap: 0.65rem;
-		margin: 0 0 0.3rem;
-		font-size: 1.05rem;
-		font-weight: 500;
-		color: #e6e8eb;
+		gap: 0.6rem;
+		margin: 0 0 0.25rem;
+		font-size: 1rem;
+		font-weight: 600;
+		color: var(--text-primary);
 	}
 	.cat-icon {
-		font-size: 1.4rem;
+		font-size: 1.3rem;
 		line-height: 1;
 	}
 	.cat-count {
 		margin-left: auto;
-		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
-		font-size: 0.78rem;
-		color: #80a8e6;
-		background: #1d2a3f;
-		border: 1px solid #2a4d8f;
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+		background: var(--surface-raised);
 		padding: 0.1rem 0.5rem;
-		border-radius: 3px;
+		border-radius: 10px;
 	}
 	.cat-desc {
-		margin: 0 0 1rem;
-		color: #6a7180;
-		font-size: 0.85rem;
+		margin: 0 0 0.8rem;
+		color: var(--text-muted);
+		font-size: 0.82rem;
 	}
 
+	/* ---- Job cards (simplified) ---- */
 	.jobs {
 		display: flex;
 		flex-direction: column;
-		gap: 0.55rem;
+		gap: 0.4rem;
 		margin: 0;
 		padding: 0;
 		list-style: none;
 	}
 	.job {
-		padding: 0.6rem 0.8rem;
-		background: #1a1f27;
-		border: 1px solid #2a2f38;
-		border-radius: 5px;
-		border-left-width: 3px;
+		padding: 0.55rem 0.75rem;
+		background: var(--surface-raised);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		border-left: 3px solid var(--text-muted);
 	}
-	.job.kind-ok {
-		border-left-color: #2a8857;
+	.job.kind-ok { border-left-color: var(--ok); }
+	.job.kind-stale { border-left-color: var(--warn); }
+	.job.kind-failed { border-left-color: var(--error); }
+	.job.kind-running { border-left-color: var(--accent); }
+	.job.kind-never { border-left-color: var(--text-muted); }
+
+	.job-row-1 {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
 	}
-	.job.kind-stale {
-		border-left-color: #a07a1a;
+	.status-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		flex-shrink: 0;
+		background: var(--text-muted);
 	}
-	.job.kind-failed {
-		border-left-color: #a02a2a;
+	.status-dot.kind-ok { background: var(--ok); }
+	.status-dot.kind-stale { background: var(--warn); }
+	.status-dot.kind-failed { background: var(--error); }
+	.status-dot.kind-running {
+		background: var(--accent);
+		animation: pulse 1.2s ease-in-out infinite;
 	}
-	.job.kind-running {
-		border-left-color: #355fb0;
-	}
-	.job.kind-never {
-		border-left-color: #4a4f58;
+	@keyframes pulse {
+		0%, 100% { opacity: 1; transform: scale(1); }
+		50% { opacity: 0.5; transform: scale(1.4); }
 	}
 
-	.job-head {
-		display: flex;
-		align-items: baseline;
-		gap: 0.7rem;
-		margin-bottom: 0.35rem;
-	}
 	.job-name {
-		color: #e6e8eb;
+		color: var(--text-primary);
 		font-weight: 500;
 		text-decoration: none;
-		font-size: 0.98rem;
+		font-size: 0.95rem;
 	}
-	.job-name:hover {
-		color: #80a8e6;
-	}
+	.job-name:hover { color: var(--accent); }
 
-	.health {
-		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
-		font-size: 0.72rem;
+	.health-label {
+		font-size: 0.75rem;
+		font-weight: 500;
 		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		padding: 0.12rem 0.5rem;
-		border-radius: 3px;
+		letter-spacing: 0.03em;
 	}
-	.health.kind-ok {
-		background: #1f3a2c;
-		color: #6ad08e;
+	.health-label.kind-ok { color: var(--ok); }
+	.health-label.kind-stale { color: var(--warn); }
+	.health-label.kind-failed { color: var(--error); }
+	.health-label.kind-running { color: var(--accent); }
+	.health-label.kind-never { color: var(--text-muted); }
+
+	.job-when {
+		color: var(--text-muted);
+		font-size: 0.78rem;
 	}
-	.health.kind-stale {
-		background: #3a341f;
-		color: #f5d36a;
-	}
-	.health.kind-failed {
-		background: #3a1f1f;
-		color: #f47373;
-	}
-	.health.kind-running {
-		background: #1d2a3f;
-		color: #80a8e6;
-	}
-	.health.kind-never {
-		background: #1f242c;
-		color: #9aa3b2;
+	.job-size {
+		color: var(--text-secondary);
+		font-size: 0.78rem;
 	}
 
-	.when {
-		color: #6a7180;
-		font-size: 0.82rem;
+	.job-row-2 {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		margin-top: 0.3rem;
+	}
+	.job-detail {
+		color: var(--text-secondary);
+		font-size: 0.8rem;
+	}
+	.warn-text { color: var(--warn); }
+
+	.badge-sm {
+		display: inline-block;
+		padding: 0.05rem 0.35rem;
+		border-radius: 3px;
+		font-size: 0.65rem;
+		text-transform: uppercase;
+		letter-spacing: 0.03em;
+		vertical-align: middle;
+		margin-left: 0.3rem;
+	}
+	.badge-rustic {
+		background: var(--accent-bg);
+		color: var(--accent);
+		border: 1px solid var(--accent-border);
+	}
+	.badge-mirror {
+		background: var(--ok-bg);
+		color: var(--ok);
+		border: 1px solid var(--ok-border);
 	}
 
 	.job-actions {
 		margin-left: auto;
 		display: flex;
 		align-items: center;
-		gap: 0.3rem;
+		gap: 0.25rem;
 	}
-	.action-run {
-		padding: 0.25rem 0.6rem;
-		background: #1d2a3f;
-		color: #80a8e6;
-		border: 1px solid #2a4d8f;
-		border-radius: 3px;
-		font: inherit;
-		font-size: 0.78rem;
-		font-weight: 500;
-		cursor: pointer;
-	}
-	.action-run:hover:not(:disabled) {
-		background: #243551;
-		color: #a8c4f0;
-	}
-	.action-run:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-	}
-	.action-restore,
-	.action-edit,
-	.action-del {
+
+	/* ---- Buttons (design-system) ---- */
+	.btn-sm {
 		display: inline-flex;
 		align-items: center;
-		justify-content: center;
-		width: 1.6rem;
-		height: 1.6rem;
-		background: transparent;
-		color: #6a7180;
-		border: 1px solid #2a2f38;
-		border-radius: 3px;
+		gap: 0.3rem;
+		padding: 0.22rem 0.55rem;
+		border: 1px solid var(--border);
+		border-radius: 5px;
 		font: inherit;
-		font-size: 0.9rem;
-		text-decoration: none;
+		font-size: 0.75rem;
+		font-weight: 500;
 		cursor: pointer;
+		text-decoration: none;
+		transition: background 0.15s, color 0.15s;
 	}
-	.action-edit:hover {
-		color: #c5cad3;
-		background: #1f242c;
+	.btn-primary {
+		background: var(--accent-bg);
+		color: var(--accent);
+		border-color: var(--accent-border);
 	}
-	.action-restore:hover {
-		color: #80a8e6;
-		border-color: #2a4d8f;
-		background: #1d2a3f;
+	.btn-primary:hover:not(:disabled) {
+		background: var(--accent-border);
 	}
-	.action-del:hover:not(:disabled) {
-		color: #f47373;
-		border-color: #5a2a2a;
-		background: #2a1f1f;
+	.btn-ghost {
+		background: transparent;
+		color: var(--text-secondary);
 	}
-	.action-del:disabled {
+	.btn-ghost:hover {
+		background: var(--surface-raised);
+		color: var(--text-primary);
+	}
+	.btn-danger {
+		background: transparent;
+		color: var(--text-muted);
+	}
+	.btn-danger:hover:not(:disabled) {
+		background: var(--error-bg);
+		color: var(--error);
+	}
+	.btn-sm:disabled {
 		opacity: 0.4;
 		cursor: not-allowed;
 	}
 
 	.action-msg {
 		margin: 0.3rem 0 0;
-		padding: 0.3rem 0.55rem;
-		background: #1f242c;
-		border-radius: 3px;
-		font-size: 0.8rem;
-		color: #80a8e6;
-	}
-
-	.flow {
-		display: grid;
-		grid-template-columns: 1fr auto minmax(140px, auto);
-		align-items: center;
-		gap: 0.6rem;
-	}
-	.source {
-		min-width: 0;
-	}
-	.arrow {
-		font-size: 1.4rem;
-		color: #4a5564;
-		line-height: 1;
-		user-select: none;
-	}
-	.dest {
-		display: flex;
-		flex-direction: column;
-		gap: 0.25rem;
-		padding: 0.4rem 0.6rem;
-		background: #131720;
-		border: 1px solid #2a2f38;
+		padding: 0.25rem 0.5rem;
+		background: var(--accent-bg);
 		border-radius: 4px;
-		text-align: right;
-		min-width: 140px;
+		font-size: 0.78rem;
+		color: var(--accent);
 	}
-	.dest-name {
-		color: #e6e8eb;
-		text-decoration: none;
-		font-weight: 500;
-		font-size: 0.88rem;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	.dest-name:hover {
-		color: #80a8e6;
-	}
-	.dest-meta {
-		display: flex;
-		flex-direction: column;
-		gap: 0.18rem;
-		align-items: flex-end;
-	}
-	.dest-stat {
-		color: #9aa3b2;
-		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
-		font-size: 0.72rem;
-	}
-	.backend-badge {
-		display: inline-block;
-		padding: 0.05rem 0.4rem;
-		border-radius: 3px;
-		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
-		font-size: 0.68rem;
-		text-transform: uppercase;
-		letter-spacing: 0.03em;
-	}
-	.backend-rustic {
-		background: #1d2a3f;
-		color: #80a8e6;
-		border: 1px solid #2a4d8f;
-	}
-	.backend-mirror {
-		background: #1f3a2c;
-		color: #6ad08e;
-		border: 1px solid #2a4d3f;
-	}
-
 	.failure-banner {
-		margin: 0.5rem 0 0;
-		padding: 0.4rem 0.7rem;
-		background: #2a1f1f;
-		border: 1px solid #5a2a2a;
-		border-radius: 4px;
-		color: #f47373;
-		font-size: 0.82rem;
+		margin: 0.35rem 0 0;
+		padding: 0.3rem 0.6rem;
+		background: var(--error-bg);
+		border: 1px solid var(--error);
+		border-radius: 5px;
+		color: var(--error);
+		font-size: 0.78rem;
 		overflow-wrap: anywhere;
 	}
 
-	.paths {
-		margin: 0;
-		padding-left: 0;
-		list-style: none;
-		display: flex;
-		flex-direction: column;
-		gap: 0.1rem;
-	}
-	.path {
-		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
-		font-size: 0.82rem;
-		color: #c5cad3;
-		overflow-wrap: anywhere;
-	}
-	.path::before {
-		content: '› ';
-		color: #4a4f58;
-	}
-	.empty-paths {
-		margin: 0;
-		color: #9aa3b2;
-		font-size: 0.85rem;
-	}
-	.empty-paths strong {
-		color: #f5d36a;
-	}
-	.resolve-error {
-		margin: 0;
-		color: #f47373;
-		font-size: 0.85rem;
-	}
-
+	/* ---- Suggestions ---- */
 	.suggestions {
-		padding: 1.3rem 1.6rem;
-		background: #131720;
-		border: 1px dashed #2a4d8f;
-		border-radius: 8px;
+		padding: 1.2rem 1.4rem;
+		background: var(--surface);
+		border: 1px dashed var(--accent-border);
+		border-radius: 10px;
 	}
 	.suggestions h3 {
 		margin: 0 0 0.3rem;
-		font-size: 1rem;
+		font-size: 0.95rem;
 		font-weight: 500;
-		color: #c5cad3;
+		color: var(--text-primary);
 	}
 	.suggestion-row {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 0.6rem;
+		gap: 0.5rem;
 	}
 	.suggest {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.5rem;
-		padding: 0.45rem 0.85rem;
-		background: #1d2a3f;
-		border: 1px solid #2a4d8f;
-		border-radius: 4px;
-		color: #80a8e6;
+		gap: 0.45rem;
+		padding: 0.4rem 0.75rem;
+		background: var(--accent-bg);
+		border: 1px solid var(--accent-border);
+		border-radius: 6px;
+		color: var(--accent);
 		text-decoration: none;
-		font-size: 0.9rem;
+		font-size: 0.85rem;
+		transition: background 0.15s;
 	}
 	.suggest:hover {
-		background: #243551;
-		color: #a8c4f0;
+		background: var(--accent-border);
 	}
-	.s-icon {
-		font-size: 1rem;
-	}
-	.s-label {
-		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
-		font-size: 0.85rem;
-	}
+	.s-icon { font-size: 1rem; }
+	.s-label { font-size: 0.82rem; }
 
 	.empty-state {
-		padding: 1.5rem;
+		padding: 2rem;
 		text-align: center;
-		color: #9aa3b2;
-	}
-	.empty-state code {
-		font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
-		color: #c5cad3;
+		color: var(--text-secondary);
 	}
 	.empty-state a {
-		color: #80a8e6;
+		color: var(--accent);
 		text-decoration: none;
 	}
 </style>

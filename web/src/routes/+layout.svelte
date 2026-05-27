@@ -54,8 +54,28 @@
 		font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
 		margin: 0;
 		padding: 0;
-		background: #0f1115;
-		color: #e6e8eb;
+		background: #12151a;
+		color: #e8eaed;
+	}
+	:global(:root) {
+		--bg: #12151a;
+		--surface: #1a1e26;
+		--surface-raised: #1f2430;
+		--border: #252a34;
+		--text-primary: #e8eaed;
+		--text-secondary: #8b919e;
+		--text-muted: #5c6370;
+		--ok: #34c759;
+		--ok-bg: #1a2e1e;
+		--ok-border: #234d2e;
+		--warn: #f0a030;
+		--warn-bg: #2e2a1a;
+		--warn-border: #4d3f1a;
+		--error: #ff5050;
+		--error-bg: #2e1a1a;
+		--accent: #5898f0;
+		--accent-bg: #1a2540;
+		--accent-border: #2a4070;
 	}
 
 	header {

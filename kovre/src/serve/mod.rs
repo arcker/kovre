@@ -1088,12 +1088,43 @@ fn handle_repositories_status(cfg: &Config) -> RouteResponse {
     let mut map = serde_json::Map::new();
     for (name, repo) in &cfg.repositories {
         let config_file = repo.path.join("config");
+        // "Reachable" = the underlying storage (drive, NAS, UNC share)
+        // is online. NOT the same as "the repo dir exists" — the repo
+        // may not have been initialized yet, but the storage is fine.
+        // Walk up the path ancestors: if any parent exists on disk,
+        // the storage is reachable.
+        let reachable = is_storage_reachable(&repo.path);
+        let initialized = match repo.backend {
+            kovre_core::config::BackendKind::Rustic => config_file.is_file(),
+            kovre_core::config::BackendKind::Mirror => repo.path.is_dir(),
+        };
         map.insert(
             name.clone(),
-            serde_json::json!({ "initialized": config_file.is_file() }),
+            serde_json::json!({
+                "initialized": initialized,
+                "reachable": reachable,
+                "backend": format!("{:?}", repo.backend).to_lowercase(),
+            }),
         );
     }
     response::json_value(StatusCode::OK, &serde_json::Value::Object(map))
+}
+
+/// Check whether the storage backing a repository path is online.
+/// Walks up the ancestors of `path` — if the path itself or any
+/// parent directory exists, the storage is considered reachable.
+/// This distinguishes "NAS is down" (no ancestor exists) from
+/// "repo not yet initialized" (parent drive exists, repo dir doesn't).
+fn is_storage_reachable(path: &std::path::Path) -> bool {
+    for ancestor in path.ancestors() {
+        if ancestor.as_os_str().is_empty() {
+            break;
+        }
+        if ancestor.is_dir() {
+            return true;
+        }
+    }
+    false
 }
 
 /// `POST /api/repositories/:name/init` — run `kovre_core::backup::init_repo`

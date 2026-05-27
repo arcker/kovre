@@ -155,6 +155,8 @@ export async function initRepositoryPassword(path: string): Promise<{ path: stri
 
 export interface RepositoryStatus {
 	initialized: boolean;
+	reachable: boolean;
+	backend: string;
 }
 
 /** Per-repo init state, keyed by repository name. Used by the

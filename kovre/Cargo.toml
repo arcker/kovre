@@ -25,6 +25,12 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_WNet",
+] }
+
 [dev-dependencies]
 indexmap = "2.14.0"
 rustic_backend = "0.6.1"

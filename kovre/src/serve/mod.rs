@@ -11,6 +11,7 @@ pub mod frontend;
 pub mod models;
 pub mod restore;
 pub mod runs;
+pub mod smb;
 pub mod sync;
 
 use std::sync::Arc;
@@ -88,9 +89,15 @@ pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Re
                 .map_err(|e| anyhow::anyhow!("initializing Snapshot event store: {e}"))?,
         );
 
+        // Authenticate against any UNC share that declared SMB
+        // credentials in kovre.yaml. Failures are logged but don't
+        // abort startup — the affected repo simply appears as
+        // "unreachable" in the dashboard.
+        let initial_cfg = cfg_arc.load_full();
+        smb::setup_connections(&initial_cfg);
+
         // Materialize snapshots from rustic into the projection at boot.
         // Failures per-repo are logged but do not abort startup.
-        let initial_cfg = cfg_arc.load_full();
         let synced = sync_snapshots(&snapshots, &initial_cfg).await;
         info!(snapshots = synced, "initial snapshot sync completed");
 
@@ -235,6 +242,18 @@ pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Re
             Method::POST,
             "/api/repositories/init-password",
             |req| async move { Ok(handle_init_password(req).await) },
+        );
+
+        // POST /api/repositories/store-smb-password { path, password }
+        // — encrypts `password` via DPAPI (CurrentUser scope) and
+        // writes the blob to `path`. The plaintext password only
+        // ever lives in memory for the duration of this call.
+        // Restricted by the default bind 127.0.0.1; the README
+        // warns explicitly against `--bind 0.0.0.0` until auth lands.
+        server = server.with_route_async(
+            Method::POST,
+            "/api/repositories/store-smb-password",
+            |req| async move { Ok(handle_store_smb_password(req).await) },
         );
 
         // POST /api/repositories/:name/init — materialize the rustic
@@ -1327,6 +1346,69 @@ async fn handle_init_password(req: RouteRequest) -> RouteResponse {
 
     let (status, payload) = init_password_data(&body.path);
     response::json_value(status, &payload)
+}
+
+/// `POST /api/repositories/store-smb-password { path, password }` —
+/// encrypts `password` via DPAPI (CurrentUser scope) and writes the
+/// resulting blob to `path`. Plaintext exists only in memory during
+/// this call.
+async fn handle_store_smb_password(req: RouteRequest) -> RouteResponse {
+    use lithair_core::app::request;
+
+    #[derive(serde::Deserialize)]
+    struct Body {
+        path: String,
+        password: String,
+    }
+    let body: Body = match request::read_body_json(req).await {
+        Ok(b) => b,
+        Err(e) => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "read_body", "reason": e.to_string()}),
+            );
+        }
+    };
+
+    let (status, payload) = store_smb_password_data(&body.path, &body.password);
+    response::json_value(status, &payload)
+}
+
+fn store_smb_password_data(raw_path: &str, password: &str) -> (StatusCode, serde_json::Value) {
+    if raw_path.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"error": "missing_path"}),
+        );
+    }
+    if raw_path.split(['/', '\\']).any(|seg| seg == "..") {
+        return (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"error": "path_traversal", "path": raw_path}),
+        );
+    }
+    if password.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"error": "empty_password"}),
+        );
+    }
+
+    let path = std::path::PathBuf::from(raw_path);
+    match kovre_core::dpapi::encrypt_string_to_file(password, &path) {
+        Ok(()) => (
+            StatusCode::OK,
+            serde_json::json!({
+                "path": raw_path,
+                "stored": true,
+                "hint": "lock the file's ACLs to your user only — kovre does not do this automatically.",
+            }),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "dpapi_encrypt", "reason": format!("{e:#}")}),
+        ),
+    }
 }
 
 fn init_password_data(raw_path: &str) -> (StatusCode, serde_json::Value) {

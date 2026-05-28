@@ -431,6 +431,8 @@ mod tests {
             path: PathBuf::from(r"C:\nope"),
             backend: BackendKind::Rustic,
             password_file: None,
+        smb_user: None,
+        smb_password_file: None,
         };
         let engine = RusticEngine::new(repo);
         let err = engine.init().unwrap_err();

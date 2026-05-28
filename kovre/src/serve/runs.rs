@@ -256,6 +256,8 @@ mod tests {
                 path: PathBuf::from(r"C:\nope"),
                 backend: BackendKind::Rustic,
                 password_file: Some(PathBuf::from(r"C:\nope.key")),
+            smb_user: None,
+            smb_password_file: None,
             },
         );
         let mut jobs = IndexMap::new();

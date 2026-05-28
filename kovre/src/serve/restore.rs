@@ -265,6 +265,8 @@ mod tests {
                 path: PathBuf::from(r"\\nas\backup"),
                 backend: BackendKind::Mirror,
                 password_file: None,
+            smb_user: None,
+            smb_password_file: None,
             },
         );
         let mut jobs: IndexMap<String, Job> = IndexMap::new();

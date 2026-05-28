@@ -66,6 +66,22 @@ pub struct Repository {
     /// `BackendKind::Mirror`. Validation happens in `Config::validate`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password_file: Option<PathBuf>,
+
+    /// Optional SMB username when `path` is a UNC and the current
+    /// Windows session is not already authenticated against the
+    /// share. The matching password is read from a DPAPI-encrypted
+    /// blob at `smb_password_file` (so the password itself never
+    /// lives in `kovre.yaml`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smb_user: Option<String>,
+
+    /// Path to a DPAPI-encrypted blob holding the SMB password.
+    /// Written by `POST /api/repositories/store-smb-password` (which
+    /// chiffre via CryptProtectData) — the blob can only be
+    /// decrypted by the same Windows user on the same machine.
+    /// ACL the file to your user only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smb_password_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]

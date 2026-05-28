@@ -219,6 +219,8 @@ fn retention_keep_last_forgets_older_snapshots() {
         path: repo_path.clone(),
         backend: kovre_core::config::BackendKind::Rustic,
         password_file: Some(password_file.clone()),
+    smb_user: None,
+    smb_password_file: None,
     };
 
     engine_for(&repo_cfg).init().unwrap();
@@ -468,6 +470,8 @@ fn restore_round_trip_rustic() {
         path: repo_path.clone(),
         backend: BackendKind::Rustic,
         password_file: Some(password_file.clone()),
+    smb_user: None,
+    smb_password_file: None,
     };
 
     let engine = engine_for(&repo_cfg);
@@ -513,6 +517,8 @@ fn restore_round_trip_mirror() {
         path: repo_path.clone(),
         backend: BackendKind::Mirror,
         password_file: None,
+    smb_user: None,
+    smb_password_file: None,
     };
 
     let engine = engine_for(&repo_cfg);

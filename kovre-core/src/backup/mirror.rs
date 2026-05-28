@@ -1089,6 +1089,8 @@ mod tests {
             path: repo,
             backend: BackendKind::Mirror,
             password_file: None,
+        smb_user: None,
+        smb_password_file: None,
         });
         (workspace, engine, source)
     }
@@ -1138,6 +1140,8 @@ mod tests {
             path: target.clone(),
             backend: BackendKind::Mirror,
             password_file: None,
+        smb_user: None,
+        smb_password_file: None,
         });
         engine.init().unwrap();
         assert!(target.is_dir());

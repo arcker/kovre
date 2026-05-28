@@ -126,6 +126,8 @@ mod tests {
             path: repo_path.clone(),
             backend: kovre_core::config::BackendKind::Rustic,
             password_file: Some(password_file.clone()),
+        smb_user: None,
+        smb_password_file: None,
         };
 
         kbackup::engine_for(&repo_cfg).init().unwrap();

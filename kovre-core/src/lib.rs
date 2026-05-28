@@ -7,5 +7,6 @@
 
 pub mod backup;
 pub mod config;
+pub mod dpapi;
 pub mod ludusavi;
 pub mod templates;

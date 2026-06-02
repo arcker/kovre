@@ -7,8 +7,12 @@ Cargo.lock.bak
 .DS_Store
 Thumbs.db
 
+# Per-developer Cargo overrides (kept out of the shared config)
+/.cargo/config.local.toml
+
 # Local kovre runtime data — never commit a real config or repo password
 /kovre.yaml
 *.key
+*.dpapi
 /data_dir/
 /.smoke/

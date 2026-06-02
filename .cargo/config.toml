@@ -1,0 +1,16 @@
+# Cargo profile tweaks for the kovre workspace.
+#
+# Disabling incremental compilation in the dev profile keeps
+# `target/` from ballooning past ~5 GB. The compile cost is a few
+# seconds per rebuild on unchanged files, which is well worth not
+# accumulating 20+ GB of intermediate artifacts that cargo never
+# garbage-collects on its own.
+#
+# If you want the incremental speedup back temporarily, run with:
+#   CARGO_INCREMENTAL=1 cargo build
+#
+# Or for full control, copy this file to .cargo/config.local.toml
+# and override per-developer (gitignored).
+
+[build]
+incremental = false

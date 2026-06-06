@@ -135,6 +135,26 @@ export interface FsStat {
 export const fsStat = (path: string): Promise<FsStat> =>
 	getJson<FsStat>(`/api/fs/stat?path=${encodeURIComponent(path)}`);
 
+/** Encrypt an SMB password via DPAPI (server-side, CurrentUser scope)
+ *  and store the resulting blob at `path`. Plaintext lives only in
+ *  memory for the duration of the call. */
+export async function storeSmbPassword(
+	path: string,
+	password: string
+): Promise<{ path: string; stored: true }> {
+	const resp = await fetch('/api/repositories/store-smb-password', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ path, password })
+	});
+	const body = await resp.json().catch(() => ({}) as Record<string, unknown>);
+	if (resp.ok) {
+		return body as { path: string; stored: true };
+	}
+	const reason = typeof body.reason === 'string' ? `: ${body.reason}` : '';
+	throw new Error(`${body.error ?? `HTTP ${resp.status}`}${reason}`);
+}
+
 /** Generate a fresh random passphrase server-side and write it to
  *  `path`. The passphrase itself never leaves the box — the response
  *  only confirms the length and target path. */

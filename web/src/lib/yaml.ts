@@ -21,6 +21,10 @@ export interface RepositoryEntry {
 	backend?: BackendKind;
 	/** Required for rustic, optional for mirror (mirror has no passphrase). */
 	password_file?: string;
+	/** SMB username when `path` is a UNC and the share needs explicit auth. */
+	smb_user?: string;
+	/** DPAPI-encrypted blob holding the SMB password (path on disk). */
+	smb_password_file?: string;
 }
 
 export interface JobEntry {
@@ -48,6 +52,10 @@ export interface RepositoryDraft {
 	backend: BackendKind;
 	/** Empty string when the form doesn't need it (mirror). */
 	password_file: string;
+	/** SMB username for UNC shares. Empty string = no SMB auth. */
+	smb_user: string;
+	/** Path to the DPAPI-encrypted SMB password blob. Empty = none. */
+	smb_password_file: string;
 }
 
 /** Quote a YAML scalar when needed — Windows paths with backslashes,
@@ -87,6 +95,12 @@ function emitRepositories(repos: Record<string, RepositoryEntry>): string {
 		}
 		if (entry.password_file && entry.password_file.length > 0) {
 			out.push(`    password_file: ${scalar(entry.password_file)}`);
+		}
+		if (entry.smb_user && entry.smb_user.length > 0) {
+			out.push(`    smb_user: ${scalar(entry.smb_user)}`);
+		}
+		if (entry.smb_password_file && entry.smb_password_file.length > 0) {
+			out.push(`    smb_password_file: ${scalar(entry.smb_password_file)}`);
 		}
 	}
 	return out.join('\n');
@@ -192,6 +206,10 @@ function draftToRepoEntry(draft: RepositoryDraft): RepositoryEntry {
 	const entry: RepositoryEntry = { path: draft.path, backend: draft.backend };
 	const pwd = draft.password_file.trim();
 	if (pwd.length > 0) entry.password_file = pwd;
+	const smbUser = draft.smb_user.trim();
+	if (smbUser.length > 0) entry.smb_user = smbUser;
+	const smbPwdFile = draft.smb_password_file.trim();
+	if (smbPwdFile.length > 0) entry.smb_password_file = smbPwdFile;
 	return entry;
 }
 

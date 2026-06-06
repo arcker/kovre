@@ -15,7 +15,9 @@
 		name: '',
 		path: '',
 		backend: 'mirror',
-		password_file: ''
+		password_file: '',
+		smb_user: '',
+		smb_password_file: ''
 	});
 
 	onMount(async () => {

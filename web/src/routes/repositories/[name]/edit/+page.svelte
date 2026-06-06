@@ -18,7 +18,9 @@
 		name: '',
 		path: '',
 		backend: 'rustic',
-		password_file: ''
+		password_file: '',
+		smb_user: '',
+		smb_password_file: ''
 	});
 
 	onMount(async () => {
@@ -34,7 +36,9 @@
 				name: repoName,
 				path: existing.path,
 				backend: existing.backend ?? 'rustic',
-				password_file: existing.password_file ?? ''
+				password_file: existing.password_file ?? '',
+				smb_user: existing.smb_user ?? '',
+				smb_password_file: existing.smb_password_file ?? ''
 			};
 		} catch (e) {
 			loadError = e instanceof Error ? e.message : String(e);

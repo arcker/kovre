@@ -115,6 +115,36 @@ Retention :
 - **mirror** : `keep_versions` (par fichier canonique dans `.versions/`).
 - **rustic** : `keep_last`, `keep_hourly`, `keep_daily`, `keep_weekly`, `keep_monthly`, `keep_yearly` (sur les snapshots).
 
+### Authentification SMB pour les UNC
+
+Si le `path` d'un repository est un UNC vers un share réseau (`\\diskstation\disque\kovre`), trois cas :
+
+1. **Session Windows déjà authentifiée** sur le share (mappage manuel, Credential Manager, GPO logon) → kovre y accède directement, rien à configurer.
+2. **Share anonyme** → idem.
+3. **Credentials explicites nécessaires** → ajouter `smb_user` et `smb_password_file` au repo :
+
+```yaml
+repositories:
+  nas:
+    path: \\diskstation\disque\kovre
+    backend: mirror
+    smb_user: kovre-backup
+    smb_password_file: C:\ProgramData\Kovre\nas.smb.dpapi
+```
+
+Le `smb_password_file` pointe sur un **blob chiffré via Windows DPAPI** (scope `CurrentUser`), pas du texte clair. Pour le créer : ouvrir l'édition du repo dans le dashboard, remplir `smb_user` + le chemin cible, taper le password dans le champ "Set SMB password" et cliquer **Store**. Le password est envoyé au serveur local en POST (jamais persisté), chiffré côté serveur via `CryptProtectData`, et seul le blob ciphered atterrit sur disque. **Seul ton utilisateur Windows sur cette machine peut le déchiffrer** — copie sur un autre PC = inutilisable.
+
+Au démarrage de `kovre serve`, kovre :
+1. Lit le blob, le déchiffre via DPAPI.
+2. Extrait `\\diskstation\disque` du UNC.
+3. Appelle `WNetAddConnection2` (Win32) avec les credentials pour authentifier la session courante.
+4. Le password vit ~10 ms en RAM puis est zeroized.
+
+**Sécurité critique** :
+- **ACL NTFS sur le fichier `.dpapi`** : restreindre à ton user uniquement (`icacls C:\ProgramData\Kovre\nas.smb.dpapi /inheritance:r /grant:r %USERNAME%:R`). Le blob est inutilisable par un autre user, mais autant éviter de le laisser lisible.
+- **SMB 3+ avec encryption sur le NAS** : SMB 1/2 doivent être désactivés côté serveur. Sinon le password est transmis en clair sur le wire à chaque op.
+- **`--bind 0.0.0.0` est interdit** sans reverse-proxy authentifié : la route `POST /api/repositories/store-smb-password` permettrait à n'importe qui sur le LAN de stocker un blob arbitraire chiffré avec ta clé DPAPI. Sur `127.0.0.1` (le défaut), c'est sécurisé par l'isolation de la machine.
+
 ## Restore (Phase 6)
 
 Depuis le dashboard, chaque job affiche un bouton **↻ Restore** dans la vue inventaire (home). Cliquer ouvre `/jobs/<name>/restore` :
@@ -211,7 +241,7 @@ Un job peut aussi être déclaré sans template : il faut alors fournir `paths` 
 
 - **Pas de restore via l'UI.** Les snapshots sont visibles, le dashboard affiche la commande `rustic restore` à utiliser.
 - **Pas de logs live d'un run en cours.** Le bouton **Run now** poll toutes les 2s jusqu'à fin. SSE/WebSocket viendront plus tard.
-- **⚠ Pas d'auth quand `--bind 0.0.0.0`** (LAN). **Ne pas utiliser `--bind 0.0.0.0` sans un reverse-proxy authentifié devant.** Les routes exposées (`PUT /api/config`, `POST /api/jobs/:name/run`, `POST /api/jobs/:name/restore`, `POST /api/repositories/init-password`) permettent respectivement de réécrire la config, lancer un backup (= lecture arbitraire de fichiers), lancer un restore (= écriture arbitraire sur disque), et créer un fichier à un chemin arbitraire. Sur `127.0.0.1` (le défaut) c'est sécurisé par l'isolation de la machine. Sur LAN, tout le réseau local y a accès. L'auth bearer-token côté kovre n'est pas encore implémentée (Phase 7).
+- **⚠ Pas d'auth quand `--bind 0.0.0.0`** (LAN). **Ne pas utiliser `--bind 0.0.0.0` sans un reverse-proxy authentifié devant.** Les routes exposées (`PUT /api/config`, `POST /api/jobs/:name/run`, `POST /api/jobs/:name/restore`, `POST /api/repositories/init-password`, `POST /api/repositories/store-smb-password`) permettent respectivement de réécrire la config, lancer un backup (= lecture arbitraire de fichiers), lancer un restore (= écriture arbitraire sur disque), créer un fichier à un chemin arbitraire, et **stocker un blob DPAPI** (= encryption d'un secret arbitraire avec ta clé utilisateur). Sur `127.0.0.1` (le défaut) c'est sécurisé par l'isolation de la machine. Sur LAN, tout le réseau local y a accès. L'auth bearer-token côté kovre n'est pas encore implémentée.
 - **Sync snapshots = boot + on-demand.** Un `kovre run` lancé en CLI pendant que `kovre serve` tourne ne fait PAS apparaître automatiquement le snapshot dans le dashboard ; cliquer le bouton **↻ Refresh** dans le header (équivalent à `POST /api/sync`).
 - **CLI vs dashboard décorrélés.** Un `kovre run` CLI crée un snapshot rustic mais **pas** de `JobRun` dans la pipeline dashboard ; seuls les runs déclenchés via `POST /api/jobs/:name/run` apparaissent dans `/runs`.
 

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import DirInput from '$lib/DirInput.svelte';
-	import { fsStat, initRepositoryPassword } from '$lib/api';
+	import { fsStat, initRepositoryPassword, storeSmbPassword } from '$lib/api';
 	import type { RepositoryDraft } from '$lib/yaml';
 
 	interface Props {
@@ -19,6 +19,41 @@
 	let passwordWarning = $state<string | null>(null);
 	let generateMessage = $state<string | null>(null);
 	let generating = $state(false);
+
+	// SMB local state — the password itself is never bound to `draft`,
+	// it lives in this component only for the duration of the "Store"
+	// click and is dropped immediately after.
+	let smbPassword = $state('');
+	let smbStoring = $state(false);
+	let smbMessage = $state<string | null>(null);
+	let smbError = $state<string | null>(null);
+
+	const isUnc = $derived(draft.path.trim().startsWith('\\\\'));
+
+	async function onStoreSmbPassword() {
+		smbMessage = null;
+		smbError = null;
+		const target = draft.smb_password_file.trim();
+		if (target === '') {
+			smbError =
+				'enter a target path first for the encrypted blob (e.g. C:\\ProgramData\\Kovre\\<repo>.smb.dpapi).';
+			return;
+		}
+		if (smbPassword === '') {
+			smbError = 'enter the SMB password before clicking Store.';
+			return;
+		}
+		smbStoring = true;
+		try {
+			const res = await storeSmbPassword(target, smbPassword);
+			smbMessage = `Encrypted blob written to ${res.path}. The plaintext password never touched disk. Lock the file's ACLs to your user only.`;
+			smbPassword = ''; // zero out from memory ASAP
+		} catch (e) {
+			smbError = e instanceof Error ? e.message : String(e);
+		} finally {
+			smbStoring = false;
+		}
+	}
 
 	async function checkPasswordFile() {
 		passwordWarning = null;
@@ -71,7 +106,9 @@
 			name: draft.name.trim(),
 			path: draft.path.trim(),
 			backend: draft.backend,
-			password_file: draft.backend === 'rustic' ? draft.password_file.trim() : ''
+			password_file: draft.backend === 'rustic' ? draft.password_file.trim() : '',
+			smb_user: isUnc ? draft.smb_user.trim() : '',
+			smb_password_file: isUnc ? draft.smb_password_file.trim() : ''
 		});
 	}
 </script>
@@ -181,6 +218,62 @@
 	</p>
 	{/if}
 
+	{#if isUnc}
+		<fieldset class="smb-section">
+			<legend>SMB authentication (UNC share detected)</legend>
+			<p class="smb-intro">
+				The path is a network share. If your Windows session is already authenticated against it
+				(via Credential Manager or a previous mapping), leave this section empty. Otherwise, kovre
+				can authenticate at boot with the credentials below.
+			</p>
+
+			<label>
+				<span class="label">SMB user</span>
+				<input type="text" bind:value={draft.smb_user} placeholder="kovre-backup or DOMAIN\\user" />
+			</label>
+
+			<label>
+				<span class="label">SMB password file (DPAPI blob)</span>
+				<input
+					type="text"
+					bind:value={draft.smb_password_file}
+					placeholder="C:\ProgramData\Kovre\nas.smb.dpapi"
+				/>
+				<span class="hint">
+					Encrypted with Windows DPAPI (CurrentUser scope). Only your user on this machine can
+					decrypt it. The plaintext password never touches disk; <code>kovre.yaml</code> only stores
+					the path.
+				</span>
+			</label>
+
+			<label>
+				<span class="label">Set SMB password (one-shot)</span>
+				<div class="smb-row">
+					<input
+						type="password"
+						bind:value={smbPassword}
+						placeholder="never written to YAML"
+						autocomplete="off"
+					/>
+					<button type="button" class="gen" onclick={onStoreSmbPassword} disabled={smbStoring}>
+						{smbStoring ? 'encrypting…' : 'Store'}
+					</button>
+				</div>
+				<span class="hint">
+					Encrypts the password via DPAPI and writes the resulting blob to the file path above.
+					Lock that file's ACLs to your user only after — kovre doesn't do it for you.
+				</span>
+			</label>
+
+			{#if smbError}
+				<span class="error">{smbError}</span>
+			{/if}
+			{#if smbMessage}
+				<span class="success">{smbMessage}</span>
+			{/if}
+		</fieldset>
+	{/if}
+
 	<div class="actions">
 		<button type="submit" class="submit" disabled={busy}>
 			{busy ? 'saving…' : submitLabel}
@@ -230,7 +323,36 @@
 		color: #c5cad3;
 	}
 
+	.smb-section {
+		display: flex;
+		flex-direction: column;
+		gap: 0.85rem;
+		padding: 1rem 1.1rem;
+		background: #1f242c;
+		border: 1px solid #2a4d8f;
+		border-radius: 5px;
+	}
+	.smb-section legend {
+		padding: 0 0.5rem;
+		color: #80a8e6;
+		font-size: 0.88rem;
+		font-weight: 500;
+	}
+	.smb-intro {
+		margin: 0 0 0.3rem;
+		color: #9aa3b2;
+		font-size: 0.85rem;
+	}
+	.smb-row {
+		display: flex;
+		gap: 0.5rem;
+	}
+	.smb-row input {
+		flex: 1;
+	}
+
 	input[type='text'],
+	input[type='password'],
 	select {
 		padding: 0.5rem 0.75rem;
 		background: #161a21;
@@ -243,6 +365,7 @@
 		box-sizing: border-box;
 	}
 	input[type='text']:focus,
+	input[type='password']:focus,
 	select:focus {
 		outline: none;
 		border-color: #355fb0;

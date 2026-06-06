@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import {
+		cancelRun,
 		getConfig,
 		getRepositoriesStatus,
 		listJobs,
@@ -197,39 +198,56 @@
 
 	// ---- Actions --------------------------------------------------------
 
+	function updateView(name: string, patch: Partial<JobView>) {
+		const idx = views.findIndex((v) => v.job.name === name);
+		if (idx < 0) return;
+		views[idx] = { ...views[idx], ...patch };
+	}
+
 	async function runJob(name: string) {
 		const view = views.find((v) => v.job.name === name);
 		if (!view || view.busy) return;
-		view.busy = true;
-		view.actionMessage = 'starting…';
+		updateView(name, { busy: true, actionMessage: 'starting…' });
 		try {
 			await triggerRun(name);
-			view.actionMessage = null;
+			updateView(name, { actionMessage: null });
 			await pollJobUntilDone(name);
 		} catch (e) {
-			view.actionMessage = e instanceof Error ? e.message : String(e);
+			updateView(name, { actionMessage: e instanceof Error ? e.message : String(e) });
 		} finally {
-			view.busy = false;
+			updateView(name, { busy: false });
 		}
 	}
 
 	async function pollJobUntilDone(name: string): Promise<void> {
-		// Only re-fetch the JobRuns projection — paths and templates
-		// don't change while a backup runs.
 		while (true) {
 			await new Promise((r) => setTimeout(r, 2000));
 			try {
 				const runs = await listJobRuns();
 				const lastRunByJob = mapLastRun(runs);
 				const fresh = lastRunByJob.get(name) ?? null;
-				const view = views.find((v) => v.job.name === name);
-				if (!view) return;
-				view.lastRun = fresh;
+				const current = views.find((v) => v.job.name === name);
+				// Only update if the status actually changed — avoids
+				// unnecessary Svelte re-renders that cause a visual flash.
+				if (current?.lastRun?.status !== fresh?.status || current?.lastRun?.finished_at !== fresh?.finished_at) {
+					updateView(name, { lastRun: fresh });
+				}
 				if (!fresh || fresh.status !== 'running') return;
 			} catch {
-				// Network hiccup: keep polling — the user will see the
-				// stale state until the next round succeeds.
+				// Network hiccup: keep polling.
 			}
+		}
+	}
+
+	async function cancelJob(name: string) {
+		updateView(name, { actionMessage: 'cancelling…' });
+		try {
+			await cancelRun(name);
+			updateView(name, { actionMessage: 'cancel requested — backup will stop at the next file' });
+		} catch (e) {
+			updateView(name, {
+				actionMessage: e instanceof Error ? e.message : String(e)
+			});
 		}
 	}
 
@@ -240,17 +258,17 @@
 			)
 		)
 			return;
-		const view = views.find((v) => v.job.name === name);
-		if (!view) return;
-		view.busy = true;
+		updateView(name, { busy: true });
 		try {
 			const cfg = await getConfig();
 			const yaml = emitConfigYaml(removeJob(cfg.parsed, name));
 			await putConfig(yaml);
 			views = views.filter((v) => v.job.name !== name);
 		} catch (e) {
-			view.actionMessage = e instanceof Error ? e.message : String(e);
-			view.busy = false;
+			updateView(name, {
+				actionMessage: e instanceof Error ? e.message : String(e),
+				busy: false
+			});
 		}
 	}
 
@@ -368,15 +386,15 @@
 			<p class="hero-sub"><a href="/templates">Pick a template to get started →</a></p>
 		{:else if allOk}
 			<div class="hero-signal signal-ok">✓</div>
-			<div>
+			<div class="hero-text">
 				<h2>Your data is safe</h2>
 				<p class="hero-sub">
 					{views.length} job{views.length === 1 ? '' : 's'} · {totalProtectedPaths} path{totalProtectedPaths === 1 ? '' : 's'} protected · last backup {formatRelative(lastSuccessfulRun?.finished_at ?? lastSuccessfulRun?.started_at ?? '')}
 				</p>
-				{#if runningJobs.length > 0}
-					<p class="hero-sub hero-running">⟳ Running: {runningJobs.join(', ')}</p>
-				{/if}
 			</div>
+			{#if runningJobs.length > 0}
+				<span class="hero-running"><span class="spinning">⟳</span> {runningJobs.join(', ')}</span>
+			{/if}
 		{:else}
 			<div class="hero-signal signal-warn">!</div>
 			<div>
@@ -446,14 +464,25 @@
 										{/if}
 									</span>
 									<div class="job-actions">
-										<button
-											type="button"
-											class="btn-sm btn-primary"
-											disabled={v.busy || v.lastRun?.status === 'running'}
-											onclick={() => runJob(v.job.name)}
-										>
-											{v.busy || v.lastRun?.status === 'running' ? '⟳' : '▶'} Run
-										</button>
+										{#if v.lastRun?.status === 'running'}
+											<button
+												type="button"
+												class="btn-sm btn-cancel"
+												onclick={() => cancelJob(v.job.name)}
+												title="Stop this backup at the next file boundary"
+											>
+												<span class="spinning">⟳</span> Cancel
+											</button>
+										{:else}
+											<button
+												type="button"
+												class="btn-sm btn-primary"
+												disabled={v.busy}
+												onclick={() => runJob(v.job.name)}
+											>
+												▶ Run
+											</button>
+										{/if}
 										<a class="btn-sm btn-ghost" href={`/jobs/${encodeURIComponent(v.job.name)}/restore`}>
 											↻ Restore
 										</a>
@@ -591,8 +620,21 @@
 		color: var(--warn);
 		font-weight: 500;
 	}
+	.hero-text {
+		flex: 1;
+		min-width: 0;
+	}
 	.hero-running {
+		margin-left: auto;
+		flex-shrink: 0;
 		color: var(--accent);
+		font-size: 0.88rem;
+		font-weight: 500;
+		padding: 0.35rem 0.75rem;
+		background: var(--accent-bg);
+		border: 1px solid var(--accent-border);
+		border-radius: 6px;
+		white-space: nowrap;
 	}
 	.muted {
 		color: var(--text-muted);
@@ -660,6 +702,7 @@
 		border: 1px solid var(--border);
 		border-radius: 8px;
 		border-left: 3px solid var(--text-muted);
+		transition: border-left-color 0.5s ease;
 	}
 	.job.kind-ok { border-left-color: var(--ok); }
 	.job.kind-stale { border-left-color: var(--warn); }
@@ -689,6 +732,14 @@
 	@keyframes pulse {
 		0%, 100% { opacity: 1; transform: scale(1); }
 		50% { opacity: 0.5; transform: scale(1.4); }
+	}
+	@keyframes spin {
+		from { transform: rotate(0deg); }
+		to { transform: rotate(360deg); }
+	}
+	.spinning {
+		display: inline-block;
+		animation: spin 1s linear infinite;
 	}
 
 	.job-name {
@@ -798,6 +849,14 @@
 	.btn-danger:hover:not(:disabled) {
 		background: var(--error-bg);
 		color: var(--error);
+	}
+	.btn-cancel {
+		background: var(--warn-bg);
+		color: var(--warn);
+		border-color: var(--warn-border);
+	}
+	.btn-cancel:hover {
+		background: var(--warn-border);
 	}
 	.btn-sm:disabled {
 		opacity: 0.4;

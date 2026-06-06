@@ -196,7 +196,7 @@ fn run_one(cfg: &Config, name: &str) -> Result<()> {
         excludes: resolved.excludes,
     };
     let snap = backup::engine_for(repo)
-        .backup(name, source)
+        .backup(name, source, None)
         .with_context(|| format!("running job `{name}`"))?;
 
     info!(

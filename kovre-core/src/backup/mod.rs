@@ -111,7 +111,18 @@ pub trait BackupEngine: Send + Sync {
     fn init(&self) -> Result<()>;
 
     /// Run a backup for `job_name` against `source`.
-    fn backup(&self, job_name: &str, source: BackupSource) -> Result<SnapshotInfo>;
+    ///
+    /// `cancel` is an optional flag the caller can set to interrupt
+    /// the backup mid-flight (mirror checks it between files,
+    /// rustic ignores it for now). When set, implementations
+    /// should bail with an error whose message starts with
+    /// `"backup cancelled"` so callers can recognize the case.
+    fn backup(
+        &self,
+        job_name: &str,
+        source: BackupSource,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<SnapshotInfo>;
 
     /// Enumerate the snapshots known for this job. Mirror returns an
     /// empty vec — its history is the `.versions/` tree.

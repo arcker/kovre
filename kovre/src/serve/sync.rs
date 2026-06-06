@@ -137,7 +137,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
 

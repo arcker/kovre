@@ -236,7 +236,7 @@ fn retention_keep_last_forgets_older_snapshots() {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
     }
@@ -482,7 +482,7 @@ fn restore_round_trip_rustic() {
             BackupSource {
                 paths: vec![source.clone()],
                 excludes: vec![],
-            },
+            }, None,
         )
         .expect("backup");
 
@@ -529,7 +529,7 @@ fn restore_round_trip_mirror() {
             BackupSource {
                 paths: vec![source.clone()],
                 excludes: vec![],
-            },
+            }, None,
         )
         .expect("backup");
 

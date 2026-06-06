@@ -4,7 +4,9 @@
 //! against an in-memory `DeclarativeHttpHandler<JobRun>`, and an
 //! orchestrating `trigger_job_run` that spawns the actual backup work.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use kovre_core::backup::{self, BackupSource, SnapshotInfo};
 use kovre_core::config::{Config, Job, Repository};
@@ -15,6 +17,50 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::serve::models::JobRun;
+
+/// Map of currently-running jobs → cancellation token. Shared
+/// between the trigger and cancel routes via the `LithairServer`'s
+/// captured Arc clones. A job is inserted when `trigger_job_run`
+/// spawns its task and removed when the task completes.
+pub type CancelMap = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
+
+pub fn new_cancel_map() -> CancelMap {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Why a `POST /api/jobs/:name/cancel` could not be honored.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "error", rename_all = "snake_case")]
+pub enum CancelError {
+    /// No running job goes by this name right now.
+    NotRunning { job: String },
+}
+
+impl std::fmt::Display for CancelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotRunning { job } => write!(f, "no running job named `{job}`"),
+        }
+    }
+}
+
+impl std::error::Error for CancelError {}
+
+/// Set the cancel flag for `job_name` if it has a running task.
+/// The mirror engine will check between files and bail.
+pub fn cancel_job_run(map: &CancelMap, job_name: &str) -> Result<(), CancelError> {
+    let guard = map.lock().expect("CancelMap mutex poisoned");
+    match guard.get(job_name) {
+        Some(token) => {
+            token.store(true, Ordering::Relaxed);
+            info!(job = job_name, "cancel requested");
+            Ok(())
+        }
+        None => Err(CancelError::NotRunning {
+            job: job_name.to_string(),
+        }),
+    }
+}
 
 /// Why a `POST /api/jobs/:name/run` could not be accepted.
 #[derive(Debug, Clone, Serialize)]
@@ -134,14 +180,13 @@ pub async fn mark_failure(
 pub async fn trigger_job_run(
     handler: Arc<DeclarativeHttpHandler<JobRun>>,
     cfg: Arc<Config>,
+    cancel_map: CancelMap,
     job_name: String,
     trigger: String,
 ) -> Result<String, TriggerError> {
     let run = register_run(&handler, &cfg, &job_name, &trigger).await?;
     let run_id = run.id.clone();
 
-    // register_run already validated `job_name` is a known job; clone the
-    // job + repo definitions for the spawned task.
     let job = cfg
         .jobs
         .get(&job_name)
@@ -149,9 +194,27 @@ pub async fn trigger_job_run(
         .clone();
     let repo = cfg.repositories.get(&job.repository).cloned();
 
+    // Insert a fresh cancel token under this job's name. A second
+    // /cancel for the same job will set this flag and the mirror
+    // engine will bail at the next file boundary.
+    let cancel_token = Arc::new(AtomicBool::new(false));
+    cancel_map
+        .lock()
+        .expect("CancelMap mutex poisoned")
+        .insert(job_name.clone(), Arc::clone(&cancel_token));
+
     let handler_for_task = Arc::clone(&handler);
+    let cancel_map_for_cleanup = Arc::clone(&cancel_map);
+    let job_name_for_cleanup = job_name.clone();
     tokio::spawn(async move {
-        let outcome = run_backup(&job_name, &job, repo).await;
+        let outcome = run_backup(&job_name, &job, repo, cancel_token).await;
+        // Remove the token regardless of outcome — the job is no
+        // longer running, future /cancel calls should 404.
+        cancel_map_for_cleanup
+            .lock()
+            .expect("CancelMap mutex poisoned")
+            .remove(&job_name_for_cleanup);
+
         match outcome {
             Ok(snapshot) => {
                 info!(
@@ -188,6 +251,7 @@ async fn run_backup(
     job_name: &str,
     job: &Job,
     repo: Option<Repository>,
+    cancel: Arc<AtomicBool>,
 ) -> anyhow::Result<SnapshotInfo> {
     let repo = repo.ok_or_else(|| {
         anyhow::anyhow!(
@@ -205,9 +269,10 @@ async fn run_backup(
     };
     let job_name_owned = job_name.to_string();
     let retention = job.retention.clone();
+    let cancel_for_task = Arc::clone(&cancel);
     tokio::task::spawn_blocking(move || -> anyhow::Result<SnapshotInfo> {
         let engine = backup::engine_for(&repo);
-        let snap = engine.backup(&job_name_owned, source)?;
+        let snap = engine.backup(&job_name_owned, source, Some(cancel_for_task))?;
         if let Some(r) = &retention {
             match engine.apply_retention(&job_name_owned, r) {
                 Ok(outcome) => {

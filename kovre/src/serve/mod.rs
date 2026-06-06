@@ -34,7 +34,9 @@ pub type ConfigHandle = Arc<ArcSwap<Config>>;
 use crate::cli::ServeArgs;
 use crate::serve::models::{JobRun, RestoreRun, Snapshot};
 use crate::serve::restore::{trigger_restore, RestoreError};
-use crate::serve::runs::{trigger_job_run, TriggerError};
+use crate::serve::runs::{
+    cancel_job_run, new_cancel_map, trigger_job_run, CancelError, CancelMap, TriggerError,
+};
 use crate::serve::sync::sync_snapshots;
 
 /// Entry point dispatched from `main::run` on `Command::Serve`.
@@ -118,12 +120,29 @@ pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Re
         // `load_full()`, which yields the current `Arc<Config>` without
         // any blocking. This is what makes `PUT /api/config` able to swap
         // the config at run time and have subsequent requests pick it up.
+        // Shared map of running jobs → cancel token. Inserted by
+        // trigger_job_run, removed when the task completes, set by
+        // /api/jobs/:name/cancel.
+        let cancel_map: CancelMap = new_cancel_map();
+
         let runs_for_route = Arc::clone(&job_runs);
         let cfg_for_route: ConfigHandle = Arc::clone(&cfg_arc);
+        let cancel_for_trigger = Arc::clone(&cancel_map);
         server = server.with_route_async(Method::POST, "/api/jobs/*/run", move |req| {
             let runs = Arc::clone(&runs_for_route);
             let cfg = cfg_for_route.load_full();
-            async move { handle_trigger(req, runs, cfg).await }
+            let cancel = Arc::clone(&cancel_for_trigger);
+            async move { handle_trigger(req, runs, cancel, cfg).await }
+        });
+
+        // POST /api/jobs/:name/cancel — set the cancel flag for a
+        // running mirror backup. The engine bails at the next file
+        // boundary (~ms latency). Rustic backups ignore the flag
+        // (cancelling mid-snapshot would corrupt the index).
+        let cancel_for_cancel_route = Arc::clone(&cancel_map);
+        server = server.with_route_async(Method::POST, "/api/jobs/*/cancel", move |req| {
+            let cancel = Arc::clone(&cancel_for_cancel_route);
+            async move { Ok(handle_cancel(req, cancel)) }
         });
 
         // POST /api/jobs/:name/restore — see `serve::restore::trigger_restore`.
@@ -373,6 +392,7 @@ pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Re
 async fn handle_trigger(
     req: RouteRequest,
     handler: Arc<DeclarativeHttpHandler<JobRun>>,
+    cancel_map: CancelMap,
     cfg: Arc<Config>,
 ) -> anyhow::Result<RouteResponse> {
     let path = req.uri().path().to_string();
@@ -386,7 +406,7 @@ async fn handle_trigger(
         }
     };
 
-    match trigger_job_run(handler, cfg, job_name, "dashboard".into()).await {
+    match trigger_job_run(handler, cfg, cancel_map, job_name, "dashboard".into()).await {
         Ok(run_id) => Ok(response::json_value(
             StatusCode::ACCEPTED,
             &serde_json::json!({"id": run_id}),
@@ -403,6 +423,33 @@ async fn handle_trigger(
             StatusCode::INTERNAL_SERVER_ERROR,
             &serde_json::json!({"error": "persistence", "reason": reason}),
         )),
+    }
+}
+
+/// `POST /api/jobs/:name/cancel` — flip the running job's cancel
+/// token to true. Mirror checks between files and bails; rustic
+/// ignores (cancelling mid-snapshot would corrupt the index).
+/// Returns 200 on success, 404 if no run is in progress.
+fn handle_cancel(req: RouteRequest, cancel_map: CancelMap) -> RouteResponse {
+    let path = req.uri().path().to_string();
+    let job_name = match extract_job_name_for_action(&path, "cancel") {
+        Some(n) => n,
+        None => {
+            return response::json_value(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": "could not parse job name from path"}),
+            );
+        }
+    };
+    match cancel_job_run(&cancel_map, &job_name) {
+        Ok(()) => response::json_value(
+            StatusCode::OK,
+            &serde_json::json!({"cancelled": true, "job": job_name}),
+        ),
+        Err(CancelError::NotRunning { job }) => response::json_value(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({"error": "not_running", "job": job}),
+        ),
     }
 }
 

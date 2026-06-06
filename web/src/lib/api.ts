@@ -415,6 +415,21 @@ export async function getRestoreRun(id: string): Promise<RestoreRun | null> {
 	return resp.json();
 }
 
+/** Cancel a running mirror backup. Sets the engine's cancel flag;
+ *  it bails at the next file boundary. Throws on 404 (no job in
+ *  progress) so the caller can surface a clear error. */
+export async function cancelRun(jobName: string): Promise<void> {
+	const resp = await fetch(`/api/jobs/${encodeURIComponent(jobName)}/cancel`, {
+		method: 'POST'
+	});
+	if (resp.status === 200) return;
+	const body = await resp.json().catch(() => ({}) as Record<string, unknown>);
+	if (resp.status === 404 && body.error === 'not_running') {
+		throw new Error(`no running job named "${jobName}"`);
+	}
+	throw new Error(`POST /api/jobs/${jobName}/cancel → HTTP ${resp.status}`);
+}
+
 /** Trigger a backup. Resolves to the new run id, or throws with a
  *  reason that includes the existing run id when 409 Conflict. */
 export async function triggerRun(jobName: string): Promise<string> {

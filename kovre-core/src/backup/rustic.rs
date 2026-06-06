@@ -75,7 +75,19 @@ impl BackupEngine for RusticEngine {
         Ok(())
     }
 
-    fn backup(&self, job_name: &str, source: BackupSource) -> Result<SnapshotInfo> {
+    fn backup(
+        &self,
+        job_name: &str,
+        source: BackupSource,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<SnapshotInfo> {
+        if cancel.is_some() {
+            warn!(
+                "cancellation tokens are not supported by the rustic backend — \
+                 cancelling mid-snapshot would risk corrupting the index. Cancel \
+                 request will be ignored."
+            );
+        }
         let backends = self.make_backends()?;
         let creds = self.credentials()?;
         let opts = RepositoryOptions::default();

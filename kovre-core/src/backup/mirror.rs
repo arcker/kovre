@@ -27,6 +27,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -81,7 +83,12 @@ impl BackupEngine for MirrorEngine {
         Ok(())
     }
 
-    fn backup(&self, job_name: &str, source: BackupSource) -> Result<SnapshotInfo> {
+    fn backup(
+        &self,
+        job_name: &str,
+        source: BackupSource,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<SnapshotInfo> {
         let job_root = self.job_root(job_name);
         let versions_root = self.versions_root(job_name);
         std::fs::create_dir_all(&job_root)
@@ -115,6 +122,13 @@ impl BackupEngine for MirrorEngine {
         let mut stats = MirrorStats::default();
 
         for src_root in &existing {
+            // Check cancellation between source paths — a long job
+            // (millions of small files on slow NAS) has plenty of
+            // wall-clock for the user to give up.
+            if is_cancelled(&cancel) {
+                anyhow::bail!("backup cancelled by user");
+            }
+
             let src_basename = src_root
                 .file_name()
                 .ok_or_else(|| {
@@ -153,6 +167,7 @@ impl BackupEngine for MirrorEngine {
                 &timestamp,
                 &mut dest_inventory,
                 &mut stats,
+                cancel.as_ref(),
             )?;
 
             archive_dest_orphans(
@@ -561,6 +576,13 @@ fn inventory_dest_files(dest_root: &Path) -> Result<HashMap<PathBuf, std::fs::Me
 ///     back to a fresh copy on miss / oversize.
 /// `dest_inventory` is consumed: matched entries are removed, so the
 /// caller can treat the leftover set as orphans.
+fn is_cancelled(token: &Option<Arc<AtomicBool>>) -> bool {
+    token
+        .as_ref()
+        .map(|t| t.load(Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
 fn sync_source_into_dest(
     src_root: &Path,
     dest_root: &Path,
@@ -569,6 +591,7 @@ fn sync_source_into_dest(
     timestamp: &str,
     dest_inventory: &mut HashMap<PathBuf, std::fs::Metadata>,
     stats: &mut MirrorStats,
+    cancel: Option<&Arc<AtomicBool>>,
 ) -> Result<()> {
     // Cache hashes we compute on dest files so a source pool with
     // many same-size siblings doesn't re-read each candidate from
@@ -576,6 +599,15 @@ fn sync_source_into_dest(
     let mut dest_hash_cache: HashMap<PathBuf, [u8; 32]> = HashMap::new();
 
     for entry in WalkDir::new(src_root).follow_links(false) {
+        // Cooperative cancellation: check between every directory
+        // entry. The user's "× Cancel" click takes effect within
+        // milliseconds even on a deep recursive walk.
+        if let Some(token) = cancel {
+            if token.load(Ordering::Relaxed) {
+                anyhow::bail!("backup cancelled by user");
+            }
+        }
+
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
@@ -1160,7 +1192,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
 
@@ -1187,7 +1219,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
 
@@ -1201,7 +1233,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
 
@@ -1226,7 +1258,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
 
@@ -1237,7 +1269,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
 
@@ -1265,7 +1297,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
         // Second backup: nothing changed → no .versions entry, no new
@@ -1276,7 +1308,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
 
@@ -1299,7 +1331,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec!["**/*.tmp".into()],
-                },
+                }, None,
             )
             .unwrap();
 
@@ -1318,7 +1350,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap_err();
         let msg = format!("{err:#}");
@@ -1338,7 +1370,7 @@ mod tests {
                     BackupSource {
                         paths: vec![source.clone()],
                         excludes: vec![],
-                    },
+                    }, None,
                 )
                 .unwrap();
             thread::sleep(Duration::from_millis(1100));
@@ -1412,7 +1444,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
 
@@ -1427,7 +1459,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
 
@@ -1467,7 +1499,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
 
@@ -1481,7 +1513,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
 
@@ -1519,7 +1551,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
 
@@ -1533,7 +1565,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
-                },
+                }, None,
             )
             .unwrap();
 

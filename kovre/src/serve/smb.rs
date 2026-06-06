@@ -97,11 +97,21 @@ fn connect_to_share(
 
     match rc {
         0 => Ok(target),
-        // ERROR_SESSION_CREDENTIAL_CONFLICT (1219) — already
-        // authenticated to this share with different creds. Treat
-        // as success: the existing session is usable.
+        // ERROR_SESSION_CREDENTIAL_CONFLICT (1219) — the share is
+        // already authenticated in this Windows session with
+        // credentials kovre did NOT supply. We continue with the
+        // existing session (won't disrupt other apps using this
+        // share), but warn the user clearly: if the active
+        // credentials differ from those in kovre.yaml, kovre's
+        // explicit `smb_user` is effectively shadowed.
         1219 => {
-            info!(target = %target, "SMB share already authenticated in this session");
+            warn!(
+                target = %target,
+                "SMB share is already authenticated in this Windows session with credentials kovre did NOT supply. \
+                 If those credentials differ from your kovre.yaml smb_user/smb_password_file, kovre is silently \
+                 using the existing session instead. To force kovre's credentials, purge the existing mapping \
+                 first: `net use {target} /delete` then restart kovre."
+            );
             Ok(target)
         }
         rc => Err(anyhow::anyhow!(

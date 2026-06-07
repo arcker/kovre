@@ -259,18 +259,23 @@ async fn run_backup(
             job.repository
         )
     })?;
-    let resolved = templates::resolve_job(job)?;
-    if resolved.paths.is_empty() {
-        anyhow::bail!("job `{job_name}` has no paths to back up");
-    }
-    let source = BackupSource {
-        paths: resolved.paths,
-        excludes: resolved.excludes,
-    };
+    // Template resolution can hit ludusavi which does its own block_on
+    // for the manifest HTTP fetch — running it on the Tokio reactor
+    // would panic with "Cannot start a runtime from within a runtime".
+    // Move the whole template + backup work into spawn_blocking.
     let job_name_owned = job_name.to_string();
     let retention = job.retention.clone();
+    let job_clone = job.clone();
     let cancel_for_task = Arc::clone(&cancel);
     tokio::task::spawn_blocking(move || -> anyhow::Result<SnapshotInfo> {
+        let resolved = templates::resolve_job(&job_clone)?;
+        if resolved.paths.is_empty() {
+            anyhow::bail!("job `{job_name_owned}` has no paths to back up");
+        }
+        let source = BackupSource {
+            paths: resolved.paths,
+            excludes: resolved.excludes,
+        };
         let engine = backup::engine_for(&repo);
         let snap = engine.backup(&job_name_owned, source, Some(cancel_for_task))?;
         if let Some(r) = &retention {

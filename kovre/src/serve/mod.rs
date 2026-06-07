@@ -23,7 +23,7 @@ use lithair_core::app::{response, Method, RouteRequest, RouteResponse, StatusCod
 use lithair_core::http::query;
 use lithair_core::http::DeclarativeHttpHandler;
 use lithair_core::LithairServer;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Shared, swappable handle on the current `Config`. Phase 3 introduces
 /// it so `PUT /api/config` can replace the running config without a
@@ -97,6 +97,14 @@ pub fn run(cfg: &Config, config_path: std::path::PathBuf, args: ServeArgs) -> Re
         // "unreachable" in the dashboard.
         let initial_cfg = cfg_arc.load_full();
         smb::setup_connections(&initial_cfg);
+
+        // Reconcile zombie runs: any JobRun/RestoreRun that was in
+        // `running` state at the previous shutdown can't possibly
+        // still be running (no Tokio task survived the restart).
+        // Mark them `failed` so the dashboard doesn't show them
+        // forever with no "× Cancel" recourse.
+        reconcile_zombie_job_runs(&job_runs).await;
+        reconcile_zombie_restore_runs(&restore_runs).await;
 
         // Materialize snapshots from rustic into the projection at boot.
         // Failures per-repo are logged but do not abort startup.
@@ -854,6 +862,56 @@ async fn handle_restore_trigger(
 /// it does not preserve user comments or original key ordering on the
 /// disk file. This is documented behavior: the dashboard's view of the
 /// config is its in-memory model, not the raw file.
+/// Boot-time cleanup of zombie `JobRun`s. Anything still in `running`
+/// state after the previous shutdown is impossible to actually be
+/// running (no Tokio task survived) — mark it `failed` so the UI
+/// doesn't hang on it forever with no cancel path.
+async fn reconcile_zombie_job_runs(handler: &Arc<DeclarativeHttpHandler<JobRun>>) {
+    let zombies: Vec<JobRun> = handler.query(|r| r.status == "running").await;
+    if zombies.is_empty() {
+        return;
+    }
+    info!(count = zombies.len(), "reconciling zombie JobRuns");
+    let now = jiff::Timestamp::now().to_string();
+    for mut run in zombies {
+        run.status = "failed".into();
+        run.failure_reason = Some(
+            "kovre was restarted while this backup was running — the run did not complete and \
+             cannot be resumed."
+                .into(),
+        );
+        run.finished_at = Some(now.clone());
+        let run_id = run.id.clone();
+        if let Err(e) = handler.apply_replicated_update(&run_id, run).await {
+            warn!(run_id, "failed to mark zombie JobRun as failed: {e}");
+        }
+    }
+}
+
+/// Same dance for `RestoreRun`. A restore that was interrupted
+/// mid-write leaves whatever it had copied so far on the destination,
+/// but the run record itself is dead.
+async fn reconcile_zombie_restore_runs(handler: &Arc<DeclarativeHttpHandler<RestoreRun>>) {
+    let zombies: Vec<RestoreRun> = handler.query(|r| r.status == "running").await;
+    if zombies.is_empty() {
+        return;
+    }
+    info!(count = zombies.len(), "reconciling zombie RestoreRuns");
+    let now = jiff::Timestamp::now().to_string();
+    for mut run in zombies {
+        run.status = "failed".into();
+        run.failure_reason = Some(
+            "kovre was restarted while this restore was running — partial files may exist at the destination."
+                .into(),
+        );
+        run.finished_at = Some(now.clone());
+        let run_id = run.id.clone();
+        if let Err(e) = handler.apply_replicated_update(&run_id, run).await {
+            warn!(run_id, "failed to mark zombie RestoreRun as failed: {e}");
+        }
+    }
+}
+
 fn handle_get_config(cfg: Arc<Config>) -> RouteResponse {
     let (status, body) = get_config_data(&cfg);
     response::json_value(status, &body)

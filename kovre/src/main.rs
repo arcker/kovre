@@ -194,6 +194,7 @@ fn run_one(cfg: &Config, name: &str) -> Result<()> {
     let source = BackupSource {
         paths: resolved.paths,
         excludes: resolved.excludes,
+        path_labels: resolved.path_labels,
     };
     let snap = backup::engine_for(repo)
         .backup(name, source, None)

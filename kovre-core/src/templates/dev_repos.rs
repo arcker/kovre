@@ -60,7 +60,11 @@ impl Template for DevReposTemplate {
             .map(|name| format!("**/{name}"))
             .collect();
 
-        Ok(ResolvedTemplate { paths, excludes })
+        Ok(ResolvedTemplate {
+            paths,
+            excludes,
+            path_labels: std::collections::HashMap::new(),
+        })
     }
 }
 

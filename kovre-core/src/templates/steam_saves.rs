@@ -56,6 +56,7 @@ impl Template for SteamSavesTemplate {
             return Ok(ResolvedTemplate {
                 paths: Vec::new(),
                 excludes: Vec::new(),
+            path_labels: std::collections::HashMap::new(),
             });
         };
         info!(steam_path = %steam_path.display(), "Steam install detected");
@@ -85,11 +86,14 @@ impl Template for SteamSavesTemplate {
                 return Ok(ResolvedTemplate {
                     paths: Vec::new(),
                     excludes: Vec::new(),
+            path_labels: std::collections::HashMap::new(),
                 });
             }
         };
 
         let mut paths: Vec<PathBuf> = Vec::new();
+        let mut path_labels: std::collections::HashMap<PathBuf, String> =
+            std::collections::HashMap::new();
         let mut games_matched = 0usize;
         let mut paths_skipped_unsupported = 0usize;
 
@@ -108,7 +112,16 @@ impl Template for SteamSavesTemplate {
                     continue;
                 }
                 match resolve_placeholders(raw_path) {
-                    Some(p) => paths.push(p),
+                    Some(p) => {
+                        // Associate the game name as a label so the
+                        // mirror engine groups by `<game>/...` rather
+                        // than colliding on raw basenames like
+                        // `remote` or `Saves`.
+                        path_labels
+                            .entry(p.clone())
+                            .or_insert_with(|| game_name.clone());
+                        paths.push(p);
+                    }
                     None => {
                         debug!(game = game_name, raw = raw_path, "unsupported placeholder");
                         paths_skipped_unsupported += 1;
@@ -130,6 +143,7 @@ impl Template for SteamSavesTemplate {
         Ok(ResolvedTemplate {
             paths,
             excludes: Vec::new(),
+            path_labels,
         })
     }
 }

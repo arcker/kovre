@@ -61,6 +61,7 @@ impl Template for UserFilesTemplate {
         Ok(ResolvedTemplate {
             paths,
             excludes: Self::EXCLUDES.iter().map(|s| s.to_string()).collect(),
+            path_labels: std::collections::HashMap::new(),
         })
     }
 }

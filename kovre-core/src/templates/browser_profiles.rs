@@ -109,6 +109,7 @@ impl Template for BrowserProfilesTemplate {
                 "**/lock".into(),
                 "**/*.lock".into(),
             ],
+            path_labels: std::collections::HashMap::new(),
         })
     }
 }

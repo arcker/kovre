@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -18,10 +19,16 @@ pub use user_files::UserFilesTemplate;
 
 use crate::config::Job;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolvedTemplate {
     pub paths: Vec<PathBuf>,
     pub excludes: Vec<String>,
+    /// Optional human-friendly label per source path. The mirror
+    /// engine uses these as the sub-directory under
+    /// `<repo>/<job>/` instead of the path basename — which lets
+    /// `steam-saves` group by game name instead of producing many
+    /// colliding `remote/` and `Saves/` folders.
+    pub path_labels: HashMap<PathBuf, String>,
 }
 
 pub trait Template {
@@ -66,5 +73,6 @@ pub fn resolve_job(job: &Job) -> Result<ResolvedTemplate> {
     Ok(ResolvedTemplate {
         paths: job.paths.clone().unwrap_or_default(),
         excludes: job.excludes.clone().unwrap_or_default(),
+        path_labels: HashMap::new(),
     })
 }

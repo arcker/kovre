@@ -275,6 +275,7 @@ async fn run_backup(
         let source = BackupSource {
             paths: resolved.paths,
             excludes: resolved.excludes,
+            path_labels: resolved.path_labels,
         };
         let engine = backup::engine_for(&repo);
         let snap = engine.backup(&job_name_owned, source, Some(cancel_for_task))?;

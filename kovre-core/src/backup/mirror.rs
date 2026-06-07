@@ -129,15 +129,21 @@ impl BackupEngine for MirrorEngine {
                 anyhow::bail!("backup cancelled by user");
             }
 
-            let src_basename = src_root
-                .file_name()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "cannot derive a basename from source path `{}`",
-                        src_root.display()
-                    )
-                })?
-                .to_owned();
+            // Prefer a template-supplied label (e.g. Steam game name)
+            // over the raw basename. Templates like steam-saves use
+            // this to avoid collisions on `remote` / `Saves` folders.
+            let src_basename: std::ffi::OsString = match source.path_labels.get(src_root) {
+                Some(label) => sanitize_label(label).into(),
+                None => src_root
+                    .file_name()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "cannot derive a basename from source path `{}`",
+                            src_root.display()
+                        )
+                    })?
+                    .to_owned(),
+            };
 
             // Refuse a source that has a top-level `.versions` of its
             // own — would self-collide with the versions tree.
@@ -931,6 +937,27 @@ fn count_versions_in_dir(
     out
 }
 
+/// Replace Windows-invalid filename characters in a label so it can
+/// safely be used as a directory name on NTFS / SMB. Trims trailing
+/// whitespace and dots (also reserved by Windows). Falls back to
+/// `unnamed` if the result is empty.
+fn sanitize_label(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => out.push('_'),
+            c if (c as u32) < 0x20 => out.push('_'),
+            c => out.push(c),
+        }
+    }
+    let trimmed = out.trim_end_matches([' ', '.']).to_string();
+    if trimmed.is_empty() {
+        "unnamed".to_string()
+    } else {
+        trimmed
+    }
+}
+
 fn build_exclude_set(patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pat in patterns {
@@ -1192,6 +1219,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();
@@ -1219,6 +1247,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();
@@ -1233,6 +1262,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();
@@ -1258,6 +1288,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();
@@ -1269,6 +1300,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();
@@ -1297,6 +1329,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();
@@ -1308,6 +1341,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();
@@ -1331,6 +1365,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec!["**/*.tmp".into()],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();
@@ -1350,6 +1385,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap_err();
@@ -1370,6 +1406,7 @@ mod tests {
                     BackupSource {
                         paths: vec![source.clone()],
                         excludes: vec![],
+                    path_labels: Default::default(),
                     }, None,
                 )
                 .unwrap();
@@ -1444,6 +1481,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();
@@ -1459,6 +1497,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();
@@ -1499,6 +1538,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();
@@ -1513,6 +1553,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();
@@ -1551,6 +1592,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();
@@ -1565,6 +1607,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();

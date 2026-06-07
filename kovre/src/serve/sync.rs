@@ -137,6 +137,7 @@ mod tests {
                 BackupSource {
                     paths: vec![source.clone()],
                     excludes: vec![],
+                    path_labels: Default::default(),
                 }, None,
             )
             .unwrap();

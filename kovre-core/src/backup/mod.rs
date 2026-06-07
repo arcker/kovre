@@ -35,6 +35,12 @@ pub const JOB_TAG_PREFIX: &str = "kovre-job:";
 pub struct BackupSource {
     pub paths: Vec<PathBuf>,
     pub excludes: Vec<String>,
+    /// Optional human-friendly label per source path. When present,
+    /// the mirror engine uses this label as the sub-directory under
+    /// `<repo>/<job>/` instead of the path basename. Empty by
+    /// default → falls back to the basename. Sanitized for filesystem
+    /// safety before use (Windows-invalid chars replaced).
+    pub path_labels: std::collections::HashMap<PathBuf, String>,
 }
 
 /// Domain-level summary of a snapshot — independent of rustic types so
